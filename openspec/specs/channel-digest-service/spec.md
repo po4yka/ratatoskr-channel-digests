@@ -117,8 +117,16 @@ commit domain mutation plus outbox operation reports atomically.
 A non-empty committed manifest SHALL cause exactly one body-free typed Knowledge recap request.
 Completion or failure SHALL settle only when owner, run, manifest digest, counts, result identity, and
 citation membership match durable evidence. Duplicate, foreign, or out-of-order facts SHALL not
-regress state. Scheduled occurrences SHALL fan out once per active owner through the same run engine
-and SHALL not emit Telegram delivery events directly.
+regress state. The service SHALL consume the typed deployment-wide schedule occurrence command
+through a dedicated durable pull consumer. Occurrence intake and all active-owner natural-key runs
+SHALL commit with one inbox decision; replay SHALL create no additional runs. The service SHALL
+compute each owner window from subscription activation and the previous/current occurrence grid
+points and SHALL not emit Telegram delivery events directly.
+
+#### Scenario: Deployment occurrence is redelivered
+
+- **WHEN** Platform redelivers one occurrence envelope after uncertain acknowledgement
+- **THEN** the inbox replays one decision and each active owner still has exactly one run for that occurrence
 
 #### Scenario: Worker stops after manifest commit
 

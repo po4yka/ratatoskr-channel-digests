@@ -26,9 +26,9 @@ grammers-client = "=0.10.0"
 grammers-mtsender = "=0.10.0"
 grammers-session = { version = "=0.10.0", default-features = false, features = ["serde"] }
 jiff = "=0.2.35"
-ratatoskr-channel-digest-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "f21a6db0b85da17229a3c042701a241514f4cdd2" }
-ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "f21a6db0b85da17229a3c042701a241514f4cdd2" }
-ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "f21a6db0b85da17229a3c042701a241514f4cdd2" }
+ratatoskr-channel-digest-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d43b62a402f47984c95037c158ec29c5ee62ee5c" }
+ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d43b62a402f47984c95037c158ec29c5ee62ee5c" }
+ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d43b62a402f47984c95037c158ec29c5ee62ee5c" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"

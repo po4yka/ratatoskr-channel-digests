@@ -6,8 +6,9 @@ use async_nats::jetstream;
 use futures_util::StreamExt as _;
 
 use ratatoskr_channel_digest_contracts::{
-    ChannelDigestRunRequested, ChannelDigestSubscriptionSetRequested,
-    KnowledgeChannelDigestRecapCompleted, KnowledgeChannelDigestRecapFailed,
+    ChannelDigestRunRequested, ChannelDigestScheduleOccurrenceRequested,
+    ChannelDigestSubscriptionSetRequested, KnowledgeChannelDigestRecapCompleted,
+    KnowledgeChannelDigestRecapFailed,
 };
 use ratatoskr_event_envelope::{
     CommandEnvelope, CommandPayload as _, EventEnvelope, EventPayload as _,
@@ -21,6 +22,7 @@ use crate::{CommandIntake, CoordinatorError, DigestCoordinator, IntakeError};
 
 const SUBSCRIPTION_SUBJECT: &str = "cmd.channel_digest.subscription.set_requested.v1";
 const RUN_SUBJECT: &str = "cmd.channel_digest.run.requested.v1";
+const SCHEDULE_SUBJECT: &str = "cmd.channel_digest.schedule.occurrence_requested.v1";
 const PLATFORM_PRODUCER: &str = "ratatoskr-platform";
 const COMPLETED_SUBJECT: &str = "evt.knowledge.channel_digest_recap.completed.v1";
 const FAILED_SUBJECT: &str = "evt.knowledge.channel_digest_recap.failed.v1";
@@ -29,6 +31,7 @@ const COMMAND_STREAM: &str = "ratatoskr_commands";
 const EVENT_STREAM: &str = "ratatoskr_events";
 const SUBSCRIPTION_DURABLE: &str = "ratatoskr_channel_digest_subscriptions";
 const RUN_DURABLE: &str = "ratatoskr_channel_digest_runs";
+const SCHEDULE_DURABLE: &str = "ratatoskr_channel_digest_schedule_occurrences";
 const COMPLETED_DURABLE: &str = "ratatoskr_channel_digest_recap_completed";
 const FAILED_DURABLE: &str = "ratatoskr_channel_digest_recap_failed";
 
@@ -63,7 +66,9 @@ impl WorkerMessageHandler {
     /// Validates and applies one exact transport subject and envelope.
     pub async fn handle(&self, subject: &str, bytes: &[u8]) -> DeliveryDisposition {
         match subject {
-            SUBSCRIPTION_SUBJECT | RUN_SUBJECT => self.handle_command(subject, bytes).await,
+            SUBSCRIPTION_SUBJECT | RUN_SUBJECT | SCHEDULE_SUBJECT => {
+                self.handle_command(subject, bytes).await
+            }
             COMPLETED_SUBJECT | FAILED_SUBJECT => self.handle_event(subject, bytes).await,
             _ => DeliveryDisposition::Term,
         }
@@ -75,6 +80,39 @@ impl WorkerMessageHandler {
         };
         if envelope.producer.as_str() != PLATFORM_PRODUCER {
             return DeliveryDisposition::Term;
+        }
+        if subject == SCHEDULE_SUBJECT {
+            if envelope.command_type.to_wire()
+                != ChannelDigestScheduleOccurrenceRequested::COMMAND_TYPE
+            {
+                return DeliveryDisposition::Term;
+            }
+            let Ok(command) = envelope.payload_as::<ChannelDigestScheduleOccurrenceRequested>()
+            else {
+                return DeliveryDisposition::Term;
+            };
+            if command.validate_for_publish().is_err()
+                || envelope.aggregate_id.to_string() != command.occurrence_ref.as_str()
+            {
+                return DeliveryDisposition::Term;
+            }
+            let Ok(payload) = serde_json::to_vec(&command) else {
+                return DeliveryDisposition::Term;
+            };
+            return match DigestCoordinator::new(self.pool.clone())
+                .accept_occurrence(
+                    envelope.command_id.0,
+                    &payload,
+                    command.occurrence_ref.as_str(),
+                    &command.previous_due_at.to_string(),
+                    &command.due_at.to_string(),
+                )
+                .await
+            {
+                Ok(_) => DeliveryDisposition::Ack,
+                Err(CoordinatorError::Invalid) => DeliveryDisposition::Term,
+                Err(CoordinatorError::Storage) => DeliveryDisposition::Nak,
+            };
         }
         let result = match subject {
             SUBSCRIPTION_SUBJECT => {
@@ -223,6 +261,8 @@ async fn consume_once(
     )
     .await?;
     let runs = exact_consumer(&context, COMMAND_STREAM, RUN_DURABLE, RUN_SUBJECT).await?;
+    let schedules =
+        exact_consumer(&context, COMMAND_STREAM, SCHEDULE_DURABLE, SCHEDULE_SUBJECT).await?;
     let completed =
         exact_consumer(&context, EVENT_STREAM, COMPLETED_DURABLE, COMPLETED_SUBJECT).await?;
     let failed = exact_consumer(&context, EVENT_STREAM, FAILED_DURABLE, FAILED_SUBJECT).await?;
@@ -233,6 +273,12 @@ async fn consume_once(
         .await
         .map_err(|_| BusRuntimeError)?;
     let mut run_messages = runs
+        .stream()
+        .max_messages_per_batch(16)
+        .messages()
+        .await
+        .map_err(|_| BusRuntimeError)?;
+    let mut schedule_messages = schedules
         .stream()
         .max_messages_per_batch(16)
         .messages()
@@ -265,6 +311,9 @@ async fn consume_once(
                 process_delivery(next, &handler, &context, pool).await?;
             }
             next = run_messages.next() => {
+                process_delivery(next, &handler, &context, pool).await?;
+            }
+            next = schedule_messages.next() => {
                 process_delivery(next, &handler, &context, pool).await?;
             }
             next = completion_messages.next() => {
