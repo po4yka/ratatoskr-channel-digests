@@ -1,0 +1,35 @@
+schema: spec-driven
+
+references:
+  - { id: ratatoskr-workspace, remote: "git@github.com:po4yka/ratatoskr-workspace.git" }
+
+context: |
+  `ratatoskr-channel-digests` owns explicitly consented MTProto access for public Telegram channels,
+  owner subscriptions, immutable post revisions, digest runs/manifests, and Knowledge result linkage.
+  Knowledge owns analysis, Platform owns public APIs and schedule timing, and Telegram owns Bot API
+  interaction and notification policy.
+
+  Stack: Rust/Tokio, SQLx/PostgreSQL, NATS JetStream, separate loopback API and worker processes,
+  narrow MTProto adapter, tracing/OpenTelemetry, deterministic fake-provider fixtures.
+
+  Development status is binding: one version only, no database migrations, and the product is
+  Ratatoskr. Cross-repository behavior belongs in the ratatoskr-workspace OpenSpec store. Repository
+  artifacts are written in English.
+
+rules:
+  specs:
+    - Every scenario must be executable as a test and state an observable outcome.
+    - Scenarios use WHEN and THEN and do not prescribe replaceable implementation details.
+  tasks:
+    - Every behavior change has separate RED and GREEN tasks.
+    - A RED task names the test and the assertion that must fail before implementation.
+    - Documentation and configuration tasks state why no failing behavior test applies.
+
+operations:
+  apply:
+    guidance:
+      - Run each new test before implementation and confirm the intended behavioral failure.
+      - Run the exact DEVELOPMENT.md gate before completion and never tick unobserved work.
+  archive:
+    guidance:
+      - Do not archive while any task is unticked.
