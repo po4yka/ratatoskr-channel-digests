@@ -15,6 +15,7 @@ async fn accepted_run_acquires_and_commits_one_recap_request()
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
+    reset_state(database.pool()).await?;
     let owner = Uuid::now_v7();
     SubscriptionRepository::new(database.pool().clone())
         .set(owner, "executor_channel", true, "2026-08-28T09:00:00Z")
@@ -69,6 +70,7 @@ async fn flood_wait_keeps_the_run_restartable_without_a_manifest()
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
+    reset_state(database.pool()).await?;
     let owner = Uuid::now_v7();
     SubscriptionRepository::new(database.pool().clone())
         .set(owner, "waiting_channel", true, "2026-08-28T09:00:00Z")
@@ -104,6 +106,83 @@ async fn flood_wait_keeps_the_run_restartable_without_a_manifest()
     assert_eq!(durable, ("acquiring".into(), 0));
     database.close().await;
     Ok(())
+}
+
+#[tokio::test]
+async fn deferred_run_does_not_block_the_next_owner() -> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    reset_state(database.pool()).await?;
+    let waiting_owner = Uuid::now_v7();
+    let ready_owner = Uuid::now_v7();
+    let subscriptions = SubscriptionRepository::new(database.pool().clone());
+    subscriptions
+        .set(
+            waiting_owner,
+            "waiting_channel",
+            true,
+            "2026-08-28T09:00:00Z",
+        )
+        .await?;
+    subscriptions
+        .set(ready_owner, "ready_channel", true, "2026-08-28T09:00:00Z")
+        .await?;
+    let waiting_run = accept_run(database.pool(), waiting_owner, "first").await?;
+    let ready_run = accept_run(database.pool(), ready_owner, "second").await?;
+    let executor = RunExecutor::new(database.pool().clone(), SelectiveProvider);
+
+    assert!(executor.execute_one().await?);
+    assert!(executor.execute_one().await?);
+    let states: (String, String) = sqlx::query_as(
+        "select
+            (select state from channel_digests.digest_runs where run_id = $1),
+            (select state from channel_digests.digest_runs where run_id = $2)",
+    )
+    .bind(waiting_run)
+    .bind(ready_run)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(states, ("acquiring".into(), "waiting_recap".into()));
+    database.close().await;
+    Ok(())
+}
+
+async fn reset_state(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "truncate channel_digests.digest_results, channel_digests.digest_manifests,
+                  channel_digests.post_revisions, channel_digests.subscriptions,
+                  channel_digests.channels, channel_digests.digest_runs,
+                  channel_digests.inbox_messages, channel_digests.outbox_messages,
+                  channel_digests.leases cascade",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn accept_run(
+    pool: &sqlx::PgPool,
+    owner: Uuid,
+    key: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let run_id = Uuid::now_v7();
+    let command = serde_json::to_vec(&serde_json::json!({
+        "operation_id": Uuid::now_v7(),
+        "owner": format!("user:{owner}"),
+        "digest_run_id": run_id,
+        "idempotency_key": format!("{key}-{run_id}"),
+        "window": {
+            "start_at": "2026-08-28T10:00:00Z",
+            "end_at": "2026-08-29T10:00:00Z"
+        },
+        "output_language": "ru",
+        "trigger": {"kind": "on_demand", "accepted_at": "2026-08-29T10:00:00Z"}
+    }))?;
+    CommandIntake::new(pool.clone())
+        .accept_run(Uuid::now_v7(), &command)
+        .await?;
+    Ok(run_id)
 }
 
 #[derive(Debug)]
@@ -153,5 +232,40 @@ impl PublicChannelProvider for WaitProvider {
         _limit: usize,
     ) -> Result<ProviderPage, ProviderError> {
         Err(ProviderError::FloodWait(Duration::from_mins(1)))
+    }
+}
+
+#[derive(Debug)]
+struct SelectiveProvider;
+
+impl PublicChannelProvider for SelectiveProvider {
+    type Channel = String;
+
+    async fn resolve_public_channel(
+        &self,
+        username: &PublicChannelUsername,
+    ) -> Result<Self::Channel, ProviderError> {
+        Ok(username.as_str().to_owned())
+    }
+
+    async fn fetch_public_posts(
+        &self,
+        channel: &Self::Channel,
+        _before_message_id: Option<i64>,
+        _limit: usize,
+    ) -> Result<ProviderPage, ProviderError> {
+        if channel == "waiting_channel" {
+            Err(ProviderError::FloodWait(Duration::from_mins(1)))
+        } else {
+            Ok(ProviderPage {
+                posts: vec![ProviderPost {
+                    message_id: 18,
+                    body: "next owner remains runnable".to_owned(),
+                    published_at: "2026-08-29T09:00:00Z".to_owned(),
+                    deleted: false,
+                }],
+                next_before_message_id: None,
+            })
+        }
     }
 }

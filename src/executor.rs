@@ -48,6 +48,13 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                on o.semantic_key = r.idempotency_key
               and o.subject = 'platform.operation.reported.v1'
              where r.state in ('accepted', 'acquiring')
+               and not exists (
+                   select 1 from channel_digests.leases l
+                   where l.resource_id = r.run_id
+                     and l.resource_kind like 'acquisition:%'
+                     and l.checkpoint->>'state' = 'flood_wait'
+                     and l.expires_at > now()
+               )
              order by r.created_at, r.run_id limit 1",
         )
         .fetch_optional(&self.pool)
