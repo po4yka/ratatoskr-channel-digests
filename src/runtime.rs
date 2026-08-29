@@ -27,6 +27,9 @@ pub enum RuntimeError {
     /// Signal handling could not be installed.
     #[error("channel digest shutdown signal is unavailable")]
     Signal,
+    /// The API-only Knowledge result reader could not be composed.
+    #[error("Knowledge result reader is unavailable")]
+    ResultReader,
     /// A joined server task failed or exceeded the shutdown bound.
     #[error("channel digest process did not drain cleanly")]
     Drain,
@@ -95,6 +98,8 @@ impl Lifecycle {
 ///
 /// Returns a safe storage, listener, signal, or drain failure.
 pub async fn run_api(config: Config) -> Result<(), RuntimeError> {
+    let result_reader = crate::KnowledgeResultReader::from_config(&config)
+        .map_err(|_| RuntimeError::ResultReader)?;
     let database = connect_database(&config).await?;
     database.apply_schema().await?;
     let lifecycle = Lifecycle::new(true);
@@ -111,6 +116,7 @@ pub async fn run_api(config: Config) -> Result<(), RuntimeError> {
             config.service_secret().to_owned(),
             config.limits.page_size,
             config.limits.request_bytes,
+            result_reader,
         ),
         operator,
         operator_router(lifecycle.clone()),

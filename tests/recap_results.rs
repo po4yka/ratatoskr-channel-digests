@@ -60,7 +60,20 @@ async fn only_consistent_terminal_facts_settle_a_run() -> Result<(), Box<dyn std
             .await?;
     assert_eq!(waiting.0, "waiting_recap");
 
-    let valid = completion(owner, run_id, result_id, &manifest.sha256);
+    let analysis_id = Uuid::now_v7();
+    let result_digest_hex = "22".repeat(32);
+    let mut valid = completion(owner, run_id, result_id, &manifest.sha256);
+    set_field(
+        &mut valid,
+        "analysis_ref",
+        serde_json::json!(format!("analysis:{analysis_id}")),
+    )?;
+    set_nested_field(
+        &mut valid,
+        "result_digest",
+        "hex",
+        serde_json::json!(result_digest_hex.clone()),
+    )?;
     let message_id = Uuid::now_v7();
     assert_eq!(
         coordinator
@@ -69,17 +82,119 @@ async fn only_consistent_terminal_facts_settle_a_run() -> Result<(), Box<dyn std
             .map_err(|error| format!("valid completion failed: {error:?}"))?,
         IntakeOutcome::Applied
     );
+    let persisted: (Uuid, String, String, i32) = sqlx::query_as(
+        "select recap_id, result_digest_hex, outcome, citation_count \
+         from channel_digests.digest_results where result_id = $1",
+    )
+    .bind(result_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        persisted,
+        (
+            analysis_id,
+            result_digest_hex.clone(),
+            "completed".to_owned(),
+            1,
+        )
+    );
     assert_eq!(
         coordinator
             .settle_completion(message_id, &serde_json::to_vec(&valid)?)
             .await?,
         IntakeOutcome::Replayed
     );
+
+    assert_contradictory_replays(&coordinator, &valid).await?;
+
     let terminal: (String, i64) = sqlx::query_as(
         "select r.state, count(result_id) from channel_digests.digest_runs r left join channel_digests.digest_results d using (run_id) where r.run_id = $1 group by r.state",
     ).bind(run_id).fetch_one(database.pool()).await?;
     assert_eq!(terminal, ("completed".into(), 1));
     database.close().await;
+    Ok(())
+}
+
+async fn assert_contradictory_replays(
+    coordinator: &DigestCoordinator,
+    valid: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut changed_analysis = valid.clone();
+    set_field(
+        &mut changed_analysis,
+        "analysis_ref",
+        serde_json::json!(format!("analysis:{}", Uuid::now_v7())),
+    )?;
+    assert!(
+        coordinator
+            .settle_completion(Uuid::now_v7(), &serde_json::to_vec(&changed_analysis)?)
+            .await
+            .is_err(),
+        "changed analysis UUID must contradict the durable terminal fact"
+    );
+
+    let mut changed_digest = valid.clone();
+    set_nested_field(
+        &mut changed_digest,
+        "result_digest",
+        "hex",
+        serde_json::json!("44".repeat(32)),
+    )?;
+    assert!(
+        coordinator
+            .settle_completion(Uuid::now_v7(), &serde_json::to_vec(&changed_digest)?)
+            .await
+            .is_err(),
+        "changed result digest must contradict the durable terminal fact"
+    );
+
+    let mut changed_outcome_and_citations = valid.clone();
+    set_field(
+        &mut changed_outcome_and_citations,
+        "coverage",
+        serde_json::json!({
+            "selected_count": 1,
+            "included_count": 0,
+            "omitted_count": 1,
+            "channel_count": 1
+        }),
+    )?;
+    assert!(
+        coordinator
+            .settle_completion(
+                Uuid::now_v7(),
+                &serde_json::to_vec(&changed_outcome_and_citations)?,
+            )
+            .await
+            .is_err(),
+        "changed outcome and citation count must contradict the durable terminal fact"
+    );
+    Ok(())
+}
+
+fn set_field(
+    value: &mut serde_json::Value,
+    field: &str,
+    replacement: serde_json::Value,
+) -> Result<(), &'static str> {
+    value
+        .as_object_mut()
+        .ok_or("completion must be an object")?
+        .insert(field.to_owned(), replacement);
+    Ok(())
+}
+
+fn set_nested_field(
+    value: &mut serde_json::Value,
+    parent: &str,
+    field: &str,
+    replacement: serde_json::Value,
+) -> Result<(), &'static str> {
+    value
+        .get_mut(parent)
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("completion field must be an object")?
+        .insert(field.to_owned(), replacement);
     Ok(())
 }
 

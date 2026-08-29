@@ -11,15 +11,28 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::{KnowledgeResultReadError, KnowledgeResultReader};
+
 #[derive(Debug, Clone)]
 pub(crate) struct ApiState {
     pool: sqlx::PgPool,
     secret: Arc<str>,
     page_limit: usize,
+    result_reader: KnowledgeResultReader,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct AuthorizedOwner(Uuid);
+
+type ResultRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<Uuid>,
+    Option<String>,
+    i32,
+    Option<String>,
+);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,11 +50,13 @@ pub(crate) fn router(
     secret: String,
     page_limit: usize,
     body_limit: usize,
+    result_reader: KnowledgeResultReader,
 ) -> Router {
     let state = ApiState {
         pool,
         secret: Arc::from(secret),
         page_limit,
+        result_reader,
     };
     let protected = Router::new()
         .route("/subscriptions", get(list_subscriptions))
@@ -133,14 +148,56 @@ async fn get_result(
     axum::Extension(owner): axum::Extension<AuthorizedOwner>,
     Path(result_id): Path<Uuid>,
 ) -> Response {
-    let row: Result<Option<(serde_json::Value,)>, _> = sqlx::query_as(
-        "select jsonb_build_object('result_id', result_id, 'run_id', run_id, 'outcome', outcome, 'recap_id', recap_id, 'citation_count', citation_count, 'safe_failure_class', safe_failure_class) from channel_digests.digest_results where result_id = $1 and owner_id = $2",
+    let row: Result<Option<ResultRow>, _> = sqlx::query_as(
+        "select result_id, run_id, outcome, recap_id, result_digest_hex, citation_count, safe_failure_class from channel_digests.digest_results where result_id = $1 and owner_id = $2",
     )
     .bind(result_id)
     .bind(owner.0)
     .fetch_optional(&state.pool)
     .await;
-    scoped_json(row)
+    let row = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return result_failure(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
+    };
+    if row.2 == "failed" {
+        return Json(serde_json::json!({
+            "result_id": row.0,
+            "run_id": row.1,
+            "outcome": row.2,
+            "safe_failure_class": row.6,
+        }))
+        .into_response();
+    }
+    let (Some(recap_id), Some(result_digest_hex)) = (row.3, row.4) else {
+        return result_failure(StatusCode::BAD_GATEWAY, "local_linkage_invalid");
+    };
+    match state.result_reader.read(recap_id, &result_digest_hex).await {
+        Ok(projection) => Json(serde_json::json!({
+            "result_id": row.0,
+            "run_id": row.1,
+            "outcome": row.2,
+            "recap_id": recap_id,
+            "citation_count": row.5,
+            "result_digest": {
+                "algorithm": "sha256",
+                "hex": projection.result_digest_hex,
+            },
+            "recap": projection.recap,
+        }))
+        .into_response(),
+        Err(KnowledgeResultReadError::Unavailable) => {
+            result_failure(StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable")
+        }
+        Err(KnowledgeResultReadError::Invalid) => {
+            result_failure(StatusCode::BAD_GATEWAY, "upstream_invalid")
+        }
+    }
+}
+
+fn result_failure(status: StatusCode, outcome: &'static str) -> Response {
+    tracing::warn!(result_read_outcome = outcome, "digest result read failed");
+    status.into_response()
 }
 
 fn scoped_json(row: Result<Option<(serde_json::Value,)>, sqlx::Error>) -> Response {

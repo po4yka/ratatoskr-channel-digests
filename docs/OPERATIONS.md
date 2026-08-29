@@ -7,6 +7,39 @@ process that can read the separately mounted session ciphertext and 32-byte key.
 tests prove bounds and recovery logic; they do not prove live Telegram authorization, channel
 visibility, production NATS topology, or deployment acceptance.
 
+## Knowledge result-reader authority
+
+Only the API role receives these settings:
+
+- `RATATOSKR__KNOWLEDGE__BASE_URL` — numeric loopback HTTP origin with a nonzero port and no path;
+- `RATATOSKR__KNOWLEDGE__RESULT_READER_SERVICE_SECRET` — dedicated non-empty secret, at most 4096
+  bytes;
+- `RATATOSKR__KNOWLEDGE__CONNECT_TIMEOUT_MS` — `1..10000`;
+- `RATATOSKR__KNOWLEDGE__REQUEST_TIMEOUT_MS` — `1..30000` and not shorter than connect timeout;
+- `RATATOSKR__KNOWLEDGE__MAX_RESPONSE_BYTES` — `1..65536`.
+
+The worker rejects every one of these keys. `check-config` validates their shape without binding a
+listener or contacting Knowledge, and diagnostics redact the secret. The API builds one pooled
+client, disables proxies and redirects, and performs one bounded request with no handler retry.
+
+Rotate the dedicated secret in this order: configure Knowledge to accept the new value, stage the
+new API secret, run API `check-config`, restart only the API, then probe direct Knowledge scope. Use
+an explicit nonexistent UUID; `404` proves the new credential reached the owner-scoped reader while
+the same request without authorization must return `401`:
+
+```sh
+test -n "${CHANNEL_DIGEST_KNOWLEDGE_RESULT_READER_SECRET:?set rotated reader secret}"
+test -n "${RATATOSKR__KNOWLEDGE__BASE_URL:?set validated Knowledge loopback origin}"
+curl --silent --output /dev/null --write-out '%{http_code}\n' --max-time 2 \
+  --header "Authorization: Bearer ${CHANNEL_DIGEST_KNOWLEDGE_RESULT_READER_SECRET}" \
+  "${RATATOSKR__KNOWLEDGE__BASE_URL}/internal/channel-digest-results/00000000-0000-0000-0000-000000000000"
+curl --silent --output /dev/null --write-out '%{http_code}\n' --max-time 2 \
+  "${RATATOSKR__KNOWLEDGE__BASE_URL}/internal/channel-digest-results/00000000-0000-0000-0000-000000000000"
+```
+
+Do not use a real analysis UUID for this probe and do not pass the secret with shell tracing enabled.
+Remove the old Knowledge credential only after an authorized Channel Digests result read succeeds.
+
 ## Session provisioning and reauthorization
 
 Perform interactive first authorization only in a temporary owner-controlled environment using the
@@ -71,3 +104,17 @@ The Platform runbook owns the actual schedule disable write. During an outage, f
 registered digest schedule and pending occurrence count, then disable it through that documented
 Platform command before stopping either digest role. Re-enable only after both digest `/ready`
 endpoints and Knowledge compatibility are healthy.
+
+## Result-reader rollout and rollback
+
+Roll out Knowledge first, recreate the development Channel Digests schema from `schema.sql`, then
+deploy Channel Digests API with the five reader settings. Do not give them to the worker. Exercise
+completed, partial, failed, foreign, missing, and unavailable result reads before enabling the
+Platform consumer; deploy Platform last.
+
+Roll back in reverse: disable or roll back Platform consumption, roll back Channel Digests API, and
+only then remove or rotate away the Knowledge reader. A transient Knowledge failure is request-local:
+the result route returns an empty `503`, while unrelated API `/ready` remains healthy. Invalid or
+integrity-inconsistent upstream data returns an empty `502`. There is no recap cleanup or conversion
+step because Channel Digests never stores recap narrative and development databases are recreated
+from the one current schema.

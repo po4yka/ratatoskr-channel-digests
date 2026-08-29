@@ -11,6 +11,8 @@ ratatoskr-channel-digests = { path = "../.." }
 tokio.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
+sqlx.workspace = true
 uuid.workspace = true
 
 [lints]

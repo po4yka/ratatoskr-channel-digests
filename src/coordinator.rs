@@ -189,8 +189,21 @@ impl DigestCoordinator {
         let run_id = fact.digest_run_id.as_uuid();
         let owner_id = fact.owner.user_id().0;
         let result_id = fact.digest_result_id.as_uuid();
-        let existing: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-            "select d.run_id, d.owner_id, m.sha256 from channel_digests.digest_results d join channel_digests.digest_manifests m using (manifest_id) where d.result_id = $1",
+        let analysis_id = fact
+            .analysis_ref
+            .as_str()
+            .strip_prefix("analysis:")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(CoordinatorError::Invalid)?;
+        let result_digest_hex = fact.result_digest.hex.as_str();
+        let outcome = if fact.coverage.omitted_count == 0 {
+            "completed"
+        } else {
+            "partial"
+        };
+        let citation_count = i32::from(fact.coverage.included_count);
+        let existing: Option<(Uuid, Uuid, String, Uuid, String, String, i32)> = sqlx::query_as(
+            "select d.run_id, d.owner_id, m.sha256, d.recap_id, d.result_digest_hex, d.outcome, d.citation_count from channel_digests.digest_results d join channel_digests.digest_manifests m using (manifest_id) where d.result_id = $1",
         )
         .bind(result_id)
         .fetch_optional(&self.pool)
@@ -202,6 +215,10 @@ impl DigestCoordinator {
                     run_id,
                     owner_id,
                     fact.manifest_digest.hex.as_str().to_owned(),
+                    analysis_id,
+                    result_digest_hex.to_owned(),
+                    outcome.to_owned(),
+                    citation_count,
                 ) {
                 Ok(IntakeOutcome::Replayed)
             } else {
@@ -226,17 +243,6 @@ impl DigestCoordinator {
         {
             return Err(CoordinatorError::Invalid);
         }
-        let analysis_id = fact
-            .analysis_ref
-            .as_str()
-            .strip_prefix("analysis:")
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or(CoordinatorError::Invalid)?;
-        let outcome = if fact.coverage.omitted_count == 0 {
-            "completed"
-        } else {
-            "partial"
-        };
         let semantic_key = result_id.to_string();
         let mut transaction = self
             .pool
@@ -259,18 +265,22 @@ impl DigestCoordinator {
                 .map_err(|_| CoordinatorError::Storage)?;
             return Ok(IntakeOutcome::Replayed);
         }
-        sqlx::query(
-            "insert into channel_digests.digest_results (result_id, run_id, manifest_id, owner_id, outcome, recap_id, citation_count) select $1, r.run_id, m.manifest_id, r.owner_id, $2, $3, $4 from channel_digests.digest_runs r join channel_digests.digest_manifests m using (run_id) where r.run_id = $5 and r.owner_id = $6",
+        let result = sqlx::query(
+            "insert into channel_digests.digest_results (result_id, run_id, manifest_id, owner_id, outcome, recap_id, result_digest_hex, citation_count) select $1, r.run_id, m.manifest_id, r.owner_id, $2, $3, $4, $5 from channel_digests.digest_runs r join channel_digests.digest_manifests m using (run_id) where r.run_id = $6 and r.owner_id = $7",
         )
         .bind(result_id)
         .bind(outcome)
         .bind(analysis_id)
-        .bind(i32::from(fact.coverage.included_count))
+        .bind(result_digest_hex)
+        .bind(citation_count)
         .bind(run_id)
         .bind(owner_id)
         .execute(&mut *transaction)
         .await
         .map_err(|_| CoordinatorError::Storage)?;
+        if result.rows_affected() != 1 {
+            return Err(CoordinatorError::Invalid);
+        }
         let changed = sqlx::query(
             "update channel_digests.digest_runs set state = $1, updated_at = now() where run_id = $2 and owner_id = $3 and state = 'waiting_recap'",
         )

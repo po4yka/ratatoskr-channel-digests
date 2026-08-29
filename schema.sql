@@ -242,9 +242,24 @@ create table if not exists channel_digests.digest_results (
     owner_id uuid not null,
     outcome text not null check (outcome in ('completed', 'partial', 'failed')),
     recap_id uuid,
+    result_digest_hex text check (
+        result_digest_hex is null or result_digest_hex ~ '^[0-9a-f]{64}$'
+    ),
     citation_count integer not null default 0 check (citation_count >= 0),
     safe_failure_class text,
     created_at timestamptz not null default now(),
+    check (
+        (
+            outcome in ('completed', 'partial')
+            and recap_id is not null
+            and result_digest_hex is not null
+        )
+        or (
+            outcome = 'failed'
+            and recap_id is null
+            and result_digest_hex is null
+        )
+    ),
     unique (owner_id, result_id)
 );
 

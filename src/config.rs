@@ -106,6 +106,28 @@ pub struct BusConfig {
     pub endpoint: String,
 }
 
+/// API-only authority and finite policy for reading completed recaps from Knowledge.
+#[derive(Debug, Clone)]
+pub struct KnowledgeResultReaderConfig {
+    /// Exact loopback HTTP origin of the Knowledge admin listener.
+    pub base_url: String,
+    service_secret: Secret,
+    /// Maximum time allowed to establish one connection.
+    pub connect_timeout_ms: u64,
+    /// End-to-end deadline for one result read.
+    pub request_timeout_ms: u64,
+    /// Maximum accepted response bytes.
+    pub max_response_bytes: usize,
+}
+
+impl KnowledgeResultReaderConfig {
+    /// Exposes the dedicated credential only to the Knowledge HTTP boundary.
+    #[must_use]
+    pub fn service_secret(&self) -> &str {
+        self.service_secret.expose()
+    }
+}
+
 /// Strict effective configuration with role-inexpressible provider authority.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -123,6 +145,8 @@ pub struct Config {
     pub provider: Option<ProviderConfig>,
     /// Present only for the worker role.
     pub bus: Option<BusConfig>,
+    /// Present only for the API role.
+    pub knowledge_result_reader: Option<KnowledgeResultReaderConfig>,
     service_secret: Secret,
 }
 
@@ -190,6 +214,11 @@ struct Builder {
     session_file: Option<PathBuf>,
     session_key_file: Option<PathBuf>,
     bus_endpoint: Option<String>,
+    knowledge_base_url: Option<String>,
+    knowledge_result_reader_service_secret: Option<Secret>,
+    knowledge_connect_timeout_ms: Option<u64>,
+    knowledge_request_timeout_ms: Option<u64>,
+    knowledge_max_response_bytes: Option<usize>,
     api_listen_address: SocketAddr,
     operator_listen_address: SocketAddr,
     limits: Limits,
@@ -206,6 +235,11 @@ impl Builder {
             session_file: None,
             session_key_file: None,
             bus_endpoint: None,
+            knowledge_base_url: None,
+            knowledge_result_reader_service_secret: None,
+            knowledge_connect_timeout_ms: None,
+            knowledge_request_timeout_ms: None,
+            knowledge_max_response_bytes: None,
             api_listen_address: SocketAddr::from(([127, 0, 0, 1], 8098)),
             operator_listen_address: SocketAddr::from((
                 [127, 0, 0, 1],
@@ -244,6 +278,22 @@ impl Builder {
             "RATATOSKR__BUS__ENDPOINT" if self.role == Role::Worker => {
                 self.bus_endpoint = Some(nonempty(key, value)?.to_owned());
             }
+            "RATATOSKR__KNOWLEDGE__BASE_URL" if self.role == Role::Api => {
+                self.knowledge_base_url = Some(loopback_http_base_url(key, value)?);
+            }
+            "RATATOSKR__KNOWLEDGE__RESULT_READER_SERVICE_SECRET" if self.role == Role::Api => {
+                self.knowledge_result_reader_service_secret =
+                    Some(bounded_secret(key, value, 4_096)?);
+            }
+            "RATATOSKR__KNOWLEDGE__CONNECT_TIMEOUT_MS" if self.role == Role::Api => {
+                self.knowledge_connect_timeout_ms = Some(parse_range(key, value, &1, &10_000)?);
+            }
+            "RATATOSKR__KNOWLEDGE__REQUEST_TIMEOUT_MS" if self.role == Role::Api => {
+                self.knowledge_request_timeout_ms = Some(parse_range(key, value, &1, &30_000)?);
+            }
+            "RATATOSKR__KNOWLEDGE__MAX_RESPONSE_BYTES" if self.role == Role::Api => {
+                self.knowledge_max_response_bytes = Some(parse_range(key, value, &1, &65_536)?);
+            }
             "RATATOSKR__API__LISTEN_ADDRESS" if self.role == Role::Api => {
                 self.api_listen_address = parse_loopback_address(key, value)?;
             }
@@ -279,8 +329,43 @@ impl Builder {
     fn finish(self) -> Result<Config, ConfigError> {
         let database_url = required(self.database_url, "RATATOSKR__DATABASE__URL")?;
         let service_secret = required(self.service_secret, "RATATOSKR__AUTH__SERVICE_SECRET")?;
-        let (provider, bus) = match self.role {
-            Role::Api => (None, None),
+        let (provider, bus, knowledge_result_reader) = match self.role {
+            Role::Api => {
+                let connect_timeout_ms = required(
+                    self.knowledge_connect_timeout_ms,
+                    "RATATOSKR__KNOWLEDGE__CONNECT_TIMEOUT_MS",
+                )?;
+                let request_timeout_ms = required(
+                    self.knowledge_request_timeout_ms,
+                    "RATATOSKR__KNOWLEDGE__REQUEST_TIMEOUT_MS",
+                )?;
+                if connect_timeout_ms > request_timeout_ms {
+                    return Err(ConfigError::new(
+                        "RATATOSKR__KNOWLEDGE__CONNECT_TIMEOUT_MS",
+                        "must not exceed the request timeout",
+                    ));
+                }
+                (
+                    None,
+                    None,
+                    Some(KnowledgeResultReaderConfig {
+                        base_url: required(
+                            self.knowledge_base_url,
+                            "RATATOSKR__KNOWLEDGE__BASE_URL",
+                        )?,
+                        service_secret: required(
+                            self.knowledge_result_reader_service_secret,
+                            "RATATOSKR__KNOWLEDGE__RESULT_READER_SERVICE_SECRET",
+                        )?,
+                        connect_timeout_ms,
+                        request_timeout_ms,
+                        max_response_bytes: required(
+                            self.knowledge_max_response_bytes,
+                            "RATATOSKR__KNOWLEDGE__MAX_RESPONSE_BYTES",
+                        )?,
+                    }),
+                )
+            }
             Role::Worker => (
                 Some(ProviderConfig {
                     api_id: required(self.provider_api_id, "RATATOSKR__PROVIDER__API_ID")?,
@@ -295,6 +380,7 @@ impl Builder {
                 Some(BusConfig {
                     endpoint: required(self.bus_endpoint, "RATATOSKR__BUS__ENDPOINT")?,
                 }),
+                None,
             ),
         };
         Ok(Config {
@@ -313,6 +399,7 @@ impl Builder {
             limits: self.limits,
             provider,
             bus,
+            knowledge_result_reader,
             service_secret,
         })
     }
@@ -320,6 +407,15 @@ impl Builder {
 
 fn nonempty_secret(key: &str, value: &str) -> Result<Secret, ConfigError> {
     Ok(Secret::new(nonempty(key, value)?.to_owned()))
+}
+
+fn bounded_secret(key: &str, value: &str, maximum_bytes: usize) -> Result<Secret, ConfigError> {
+    let value = nonempty(key, value)?;
+    if value.len() <= maximum_bytes {
+        Ok(Secret::new(value.to_owned()))
+    } else {
+        Err(ConfigError::new(key, "exceeds the finite byte limit"))
+    }
 }
 
 fn nonempty<'a>(key: &str, value: &'a str) -> Result<&'a str, ConfigError> {
@@ -347,6 +443,29 @@ fn parse_loopback_address(key: &str, value: &str) -> Result<SocketAddr, ConfigEr
         Ok(address)
     } else {
         Err(ConfigError::new(key, "must be a loopback socket address"))
+    }
+}
+
+fn loopback_http_base_url(key: &str, value: &str) -> Result<String, ConfigError> {
+    let uri = value
+        .parse::<axum::http::Uri>()
+        .map_err(|_| ConfigError::new(key, "must be a loopback HTTP origin"))?;
+    let authority = uri
+        .authority()
+        .ok_or_else(|| ConfigError::new(key, "must be a loopback HTTP origin"))?;
+    let address = authority
+        .as_str()
+        .parse::<SocketAddr>()
+        .map_err(|_| ConfigError::new(key, "must be a loopback HTTP origin"))?;
+    let path_is_origin = uri.path_and_query().is_none_or(|path| path.as_str() == "/");
+    if uri.scheme_str() == Some("http")
+        && address.ip().is_loopback()
+        && address.port() != 0
+        && path_is_origin
+    {
+        Ok(format!("http://{authority}"))
+    } else {
+        Err(ConfigError::new(key, "must be a loopback HTTP origin"))
     }
 }
 

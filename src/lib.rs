@@ -14,6 +14,7 @@ mod intake;
 mod maintenance;
 mod manifest;
 mod provider;
+mod result_reader;
 mod revisions;
 mod runs;
 mod runtime;
@@ -32,6 +33,9 @@ pub use manifest::{CanonicalManifest, ManifestBuilder, ManifestError, ManifestSo
 pub use provider::{
     MtProtoPublicChannelProvider, ProviderError, ProviderPage, ProviderPost, PublicChannelProvider,
     PublicChannelUsername, ResolvedPublicChannel,
+};
+pub use result_reader::{
+    KnowledgeResultProjection, KnowledgeResultReadError, KnowledgeResultReader,
 };
 pub use revisions::{ObservedRevision, RevisionError, RevisionRepository};
 pub use runs::{DigestRun, RunError, RunRepository, RunState, RunTrigger};
