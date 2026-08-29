@@ -1,0 +1,17 @@
+[package]
+name = "ratatoskr-channel-digests-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ratatoskr-channel-digests = { path = "../.." }
+tokio.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[lints]
+workspace = true

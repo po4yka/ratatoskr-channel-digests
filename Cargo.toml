@@ -1,0 +1,93 @@
+[package]
+name = "ratatoskr-channel-digests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[workspace]
+resolver = "3"
+members = ["services/api", "services/worker"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "BSD-3-Clause"
+repository = "https://github.com/po4yka/ratatoskr-channel-digests"
+
+[workspace.dependencies]
+async-nats = { version = "=0.50.0", default-features = false, features = ["ring", "jetstream", "nkeys"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+chacha20poly1305 = "=0.10.1"
+futures-util = "=0.3.34"
+grammers-client = "=0.10.0"
+grammers-mtsender = "=0.10.0"
+grammers-session = { version = "=0.10.0", default-features = false, features = ["serde"] }
+jiff = "=0.2.35"
+ratatoskr-channel-digest-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "f21a6db0b85da17229a3c042701a241514f4cdd2" }
+ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "f21a6db0b85da17229a3c042701a241514f4cdd2" }
+ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "f21a6db0b85da17229a3c042701a241514f4cdd2" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid"] }
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "=0.5.3", features = ["util"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "registry"] }
+uuid = { version = "=1.24.1", features = ["serde", "v7"] }
+
+[dependencies]
+async-nats.workspace = true
+axum.workspace = true
+chacha20poly1305.workspace = true
+futures-util.workspace = true
+grammers-client.workspace = true
+grammers-mtsender.workspace = true
+grammers-session.workspace = true
+jiff.workspace = true
+ratatoskr-channel-digest-contracts.workspace = true
+ratatoskr-event-envelope.workspace = true
+ratatoskr-identifiers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+zeroize = "=1.8.2"
+
+[dev-dependencies]
+tokio.workspace = true
+uuid.workspace = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+
+[lints]
+workspace = true
+
+[profile.release]
+debug = 1

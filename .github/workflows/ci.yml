@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+        env:
+          POSTGRES_USER: channel_digest
+          POSTGRES_PASSWORD: channel_digest
+          POSTGRES_DB: channel_digest
+        ports: ["15435:5432"]
+        options: >-
+          --health-cmd "pg_isready -U channel_digest"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CHANNEL_DIGEST_TEST_DATABASE_URL: postgres://channel_digest:channel_digest@127.0.0.1:15435/channel_digest
+      CHANNEL_DIGEST_TEST_NATS_URL: nats://127.0.0.1:14224
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        with:
+          tool: cargo-deny
+      - run: npm install --global @fission-ai/openspec@1.10.0 # zizmor: ignore[adhoc-packages]
+      - name: Start disposable JetStream
+        run: |
+          docker run -d --name channel-digest-ci-nats \
+            -p 127.0.0.1:14224:4222 \
+            nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da \
+            -js
+          for attempt in $(seq 1 30); do
+            if bash -c 'exec 3<>/dev/tcp/127.0.0.1/14224'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs channel-digest-ci-nats
+          exit 1
+      - run: ./tools/full-gate.sh
