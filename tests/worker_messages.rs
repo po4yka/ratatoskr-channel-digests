@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use ratatoskr_channel_digests::{Database, DeliveryDisposition, WorkerMessageHandler};
+use ratatoskr_channel_digests::{
+    Database, DeliveryDisposition, SubscriptionRepository, WorkerMessageHandler,
+};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -132,6 +134,66 @@ async fn run_envelope_preserves_selected_identity_and_replays()
     .fetch_one(database.pool())
     .await?;
     assert_eq!(durable, (run_id, 1, 1));
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn schedule_occurrence_envelope_fans_out_once_to_active_owners()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let owner = Uuid::now_v7();
+    SubscriptionRepository::new(database.pool().clone())
+        .set(
+            owner,
+            "scheduled_worker_channel",
+            true,
+            "2026-08-19T10:00:00Z",
+        )
+        .await?;
+    let command_id = Uuid::now_v7();
+    let occurrence_id = Uuid::now_v7();
+    let envelope = serde_json::to_vec(&serde_json::json!({
+        "command_id": command_id,
+        "command_type": "channel_digest.schedule.occurrence_requested.v1",
+        "issued_at": "2026-08-21T10:00:00Z",
+        "producer": "ratatoskr-platform",
+        "aggregate_id": format!("schedule-occurrence:{occurrence_id}"),
+        "correlation_id": format!("operation:{}", Uuid::now_v7()),
+        "tenant_id": format!("user:{}", Uuid::now_v7()),
+        "schema_version": 1,
+        "payload": {
+            "schedule_ref": format!("schedule:{}", Uuid::now_v7()),
+            "occurrence_ref": format!("schedule-occurrence:{occurrence_id}"),
+            "previous_due_at": "2026-08-20T10:00:00Z",
+            "due_at": "2026-08-21T10:00:00Z"
+        }
+    }))?;
+    let handler = WorkerMessageHandler::new(database.pool().clone());
+
+    for _ in 0..2 {
+        assert_eq!(
+            handler
+                .handle(
+                    "cmd.channel_digest.schedule.occurrence_requested.v1",
+                    &envelope,
+                )
+                .await,
+            DeliveryDisposition::Ack
+        );
+    }
+    let counts: (i64, i64) = sqlx::query_as(
+        "select (select count(*) from channel_digests.digest_runs where owner_id = $1 and idempotency_key = $2),
+                (select count(*) from channel_digests.inbox_messages where message_id = $3)",
+    )
+    .bind(owner)
+    .bind(format!("schedule-occurrence:{occurrence_id}"))
+    .bind(command_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(counts, (1, 1));
     database.close().await;
     Ok(())
 }

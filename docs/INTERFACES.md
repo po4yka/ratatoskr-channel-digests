@@ -24,6 +24,7 @@ The worker opens but never creates these fleet-owned pull consumers:
 | --- | --- | --- |
 | `ratatoskr_commands` | `ratatoskr_channel_digest_subscriptions` | `cmd.channel_digest.subscription.set_requested.v1` |
 | `ratatoskr_commands` | `ratatoskr_channel_digest_runs` | `cmd.channel_digest.run.requested.v1` |
+| `ratatoskr_commands` | `ratatoskr_channel_digest_schedule_occurrences` | `cmd.channel_digest.schedule.occurrence_requested.v1` |
 | `ratatoskr_events` | `ratatoskr_channel_digest_recap_completed` | `evt.knowledge.channel_digest_recap.completed.v1` |
 | `ratatoskr_events` | `ratatoskr_channel_digest_recap_failed` | `evt.knowledge.channel_digest_recap.failed.v1` |
 

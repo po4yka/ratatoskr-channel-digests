@@ -403,33 +403,51 @@ impl DigestCoordinator {
         Ok(IntakeOutcome::Applied)
     }
 
-    /// Fans one authoritative schedule occurrence out to active owners through run identities.
+    /// Accepts and fans one authoritative schedule occurrence out to active owners.
     ///
     /// # Errors
     ///
     /// Returns a safe storage class when fan-out cannot be made durable.
-    pub async fn fan_out_occurrence(
+    pub async fn accept_occurrence(
         &self,
+        message_id: Uuid,
+        payload: &[u8],
         occurrence_key: &str,
         prior_at: &str,
         due_at: &str,
-    ) -> Result<usize, CoordinatorError> {
+    ) -> Result<IntakeOutcome, CoordinatorError> {
         if !occurrence_key.starts_with("schedule-occurrence:") {
             return Err(CoordinatorError::Invalid);
         }
-        let owners: Vec<(Uuid, String)> = sqlx::query_as(
-            "select owner_id, min(first_activated_at)::text from channel_digests.subscriptions where enabled and first_activated_at < $1::timestamptz group by owner_id order by owner_id",
-        )
-        .bind(due_at)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|_| CoordinatorError::Storage)?;
-        let mut inserted = 0;
+        let payload_sha256 = format!("{:x}", sha2::Sha256::digest(payload));
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|_| CoordinatorError::Storage)?;
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "insert into channel_digests.inbox_messages (message_id, subject, semantic_key, payload_sha256, state) values ($1, 'channel_digest.schedule.occurrence_requested.v1', $2, $3, 'processing') on conflict do nothing returning message_id",
+        )
+        .bind(message_id)
+        .bind(occurrence_key)
+        .bind(payload_sha256)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+        if inserted.is_none() {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| CoordinatorError::Storage)?;
+            return Ok(IntakeOutcome::Replayed);
+        }
+        let owners: Vec<(Uuid, String)> = sqlx::query_as(
+            "select owner_id, min(first_activated_at)::text from channel_digests.subscriptions where enabled and first_activated_at < $1::timestamptz group by owner_id order by owner_id",
+        )
+        .bind(due_at)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
         for (owner_id, activation_at) in owners {
             let window: (String, String) = sqlx::query_as(
                 "select start_at::text, end_at::text from channel_digests.normalized_window(true, $1::timestamptz, $2::timestamptz, $3::timestamptz)",
@@ -440,23 +458,29 @@ impl DigestCoordinator {
             .fetch_one(&mut *transaction)
             .await
             .map_err(|_| CoordinatorError::Storage)?;
-            let row: Option<(Uuid,)> = sqlx::query_as(
-                "insert into channel_digests.digest_runs (run_id, owner_id, trigger, idempotency_key, window_start, window_end, state) values ($1, $2, 'scheduled', $3, $4::timestamptz, $5::timestamptz, 'accepted') on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing returning run_id",
+            sqlx::query(
+                "insert into channel_digests.digest_runs (run_id, owner_id, trigger, idempotency_key, window_start, window_end, state) values ($1, $2, 'scheduled', $3, $4::timestamptz, $5::timestamptz, 'accepted') on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing",
             )
             .bind(Uuid::now_v7())
             .bind(owner_id)
             .bind(occurrence_key)
             .bind(&window.0)
             .bind(&window.1)
-            .fetch_optional(&mut *transaction)
+            .execute(&mut *transaction)
             .await
             .map_err(|_| CoordinatorError::Storage)?;
-            inserted += usize::from(row.is_some());
         }
+        sqlx::query(
+            "update channel_digests.inbox_messages set state = 'completed', completed_at = now() where message_id = $1",
+        )
+        .bind(message_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
         transaction
             .commit()
             .await
             .map_err(|_| CoordinatorError::Storage)?;
-        Ok(inserted)
+        Ok(IntakeOutcome::Applied)
     }
 }

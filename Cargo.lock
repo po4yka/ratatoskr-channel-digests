@@ -2073,7 +2073,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 [[package]]
 name = "ratatoskr-channel-digest-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=f21a6db0b85da17229a3c042701a241514f4cdd2#f21a6db0b85da17229a3c042701a241514f4cdd2"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=d43b62a402f47984c95037c158ec29c5ee62ee5c#d43b62a402f47984c95037c158ec29c5ee62ee5c"
 dependencies = [
  "jiff",
  "ratatoskr-event-envelope",
@@ -2138,7 +2138,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-event-envelope"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=f21a6db0b85da17229a3c042701a241514f4cdd2#f21a6db0b85da17229a3c042701a241514f4cdd2"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=d43b62a402f47984c95037c158ec29c5ee62ee5c#d43b62a402f47984c95037c158ec29c5ee62ee5c"
 dependencies = [
  "jiff",
  "ratatoskr-identifiers",
@@ -2153,7 +2153,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-identifiers"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=f21a6db0b85da17229a3c042701a241514f4cdd2#f21a6db0b85da17229a3c042701a241514f4cdd2"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=d43b62a402f47984c95037c158ec29c5ee62ee5c#d43b62a402f47984c95037c158ec29c5ee62ee5c"
 dependencies = [
  "jiff",
  "regex",

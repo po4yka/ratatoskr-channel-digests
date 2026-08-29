@@ -207,6 +207,10 @@ async fn provision_topology(nats_url: &str) -> Result<(), Box<dyn std::error::Er
             "ratatoskr_channel_digest_runs",
             "cmd.channel_digest.run.requested.v1",
         ),
+        (
+            "ratatoskr_channel_digest_schedule_occurrences",
+            "cmd.channel_digest.schedule.occurrence_requested.v1",
+        ),
     ] {
         commands
             .get_or_create_consumer(
