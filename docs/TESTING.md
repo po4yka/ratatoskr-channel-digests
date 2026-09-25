@@ -16,11 +16,10 @@ Fixtures use synthetic MTProto session material, a fake public-channel provider,
 
 ## The gate
 
-`.github/workflows/ci.yml` is the command-list source of truth; there is no separate gate script. Its `gate` job runs, against a disposable PostgreSQL 17 service and a disposable JetStream container it starts, with `CHANNEL_DIGEST_TEST_DATABASE_URL` and `CHANNEL_DIGEST_TEST_NATS_URL` set:
+`.github/workflows/ci.yml` is the command-list source of truth; there is no separate gate script. A separate `deny` job runs `cargo deny --locked check` on its own, so a new RustSec advisory cannot hide a clippy or test failure behind it. The `gate` job runs, against a disposable PostgreSQL 17 service and a disposable JetStream container it starts, with `CHANNEL_DIGEST_TEST_DATABASE_URL` and `CHANNEL_DIGEST_TEST_NATS_URL` set:
 
 ```sh
 cargo fmt --all --check
-cargo deny --locked check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked -- --test-threads=1
 cargo build --workspace --all-targets --all-features --locked
