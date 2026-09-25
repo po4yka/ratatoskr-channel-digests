@@ -6,11 +6,10 @@ through `build-gate --`; CI runs the equivalent Cargo command directly.
 
 ## Full gate
 
-`.github/workflows/ci.yml` is the command-list source of truth. Its `gate` job runs, in this order, with `CHANNEL_DIGEST_TEST_DATABASE_URL=postgres://channel_digest:channel_digest@127.0.0.1:15435/channel_digest` and `CHANNEL_DIGEST_TEST_NATS_URL=nats://127.0.0.1:14224` set:
+`.github/workflows/ci.yml` is the command-list source of truth. A separate `deny` job runs `cargo deny --locked check` on its own, so a new RustSec advisory cannot hide a clippy or test failure behind it. Its `gate` job runs, in this order, with `CHANNEL_DIGEST_TEST_DATABASE_URL=postgres://channel_digest:channel_digest@127.0.0.1:15435/channel_digest` and `CHANNEL_DIGEST_TEST_NATS_URL=nats://127.0.0.1:14224` set:
 
 ```sh
 cargo fmt --all --check
-cargo deny --locked check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked -- --test-threads=1
 cargo build --workspace --all-targets --all-features --locked
