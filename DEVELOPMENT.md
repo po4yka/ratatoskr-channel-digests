@@ -28,3 +28,38 @@ credential, network session, private channel, real user/chat identifier, or sour
 Both binaries accept `check-config`. It parses strict role-specific settings and, for the worker,
 authenticates the bounded encrypted session file without binding ports or contacting Telegram.
 Diagnostics report only stable error classes and key names.
+
+## What a clone needs before you plan a change
+
+A change is planned with OpenSpec, which is a CLI a clone installs for itself. Use the version
+`.github/workflows/openspec.yml` pins, so your terminal and the gate answer the same:
+
+```bash
+npm install --global @fission-ai/openspec@1.10.0
+```
+
+Cross-repository behaviour lives in a store, and registering one is per-machine state that no
+repository can turn on for you — the same kind of step as `git config core.hooksPath .githooks`:
+
+```bash
+git clone git@github.com:po4yka/ratatoskr-workspace.git <path>
+openspec store register <path> --id ratatoskr-workspace
+```
+
+`openspec doctor` reports whether both are in place.
+
+## The Rust skills in this repository
+
+`.agents/skills/` holds eighteen Rust skills vendored from `po4yka/rust-skills`, and
+`.claude/skills/` symlinks to them. Unlike the steps above this needs nothing from your machine: the
+files are in the tree, so a fresh clone already has them.
+
+Update them with the catalogue and never by hand:
+
+```bash
+npx skills update
+```
+
+That rewrites `.agents/skills/` and `skills-lock.json` from the catalogue. Run it in one repository,
+read the diff, then apply the same change to every Ratatoskr repository whose stack is Rust.
+`ratatoskr-workspace/.github/workflows/drift.yml` fails when one copy differs from the others.
