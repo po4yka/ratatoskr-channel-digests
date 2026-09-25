@@ -18,28 +18,28 @@ license = "BSD-3-Clause"
 repository = "https://github.com/po4yka/ratatoskr-channel-digests"
 
 [workspace.dependencies]
-async-nats = { version = "=0.50.0", default-features = false, features = ["ring", "jetstream", "nkeys"] }
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
-chacha20poly1305 = "=0.10.1"
-futures-util = "=0.3.34"
-grammers-client = "=0.10.0"
-grammers-mtsender = "=0.10.0"
-grammers-session = { version = "=0.10.0", default-features = false, features = ["serde"] }
-jiff = "=0.2.35"
+async-nats = { version = "0.50.0", default-features = false, features = ["ring", "jetstream", "nkeys"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+chacha20poly1305 = "0.10.1"
+futures-util = "0.3.34"
+grammers-client = "0.10.0"
+grammers-mtsender = "0.10.0"
+grammers-session = { version = "0.10.0", default-features = false, features = ["serde"] }
+jiff = "0.2.35"
 ratatoskr-channel-digest-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d43b62a402f47984c95037c158ec29c5ee62ee5c" }
 ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d43b62a402f47984c95037c158ec29c5ee62ee5c" }
 ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d43b62a402f47984c95037c158ec29c5ee62ee5c" }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
-serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-sha2 = "=0.10.9"
-sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid"] }
-thiserror = "=2.0.20"
-tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tower = { version = "=0.5.3", features = ["util"] }
-tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "registry"] }
-uuid = { version = "=1.24.1", features = ["serde", "v7"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid"] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "registry"] }
+uuid = { version = "1.24.1", features = ["serde", "v7"] }
 
 [dependencies]
 async-nats.workspace = true
@@ -63,7 +63,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-zeroize = "=1.8.2"
+zeroize = "1.8.2"
 
 [dev-dependencies]
 tokio.workspace = true
