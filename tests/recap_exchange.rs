@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::sha256_hex;
 use ratatoskr_channel_digests::{
     Database, DigestCoordinator, IntakeOutcome, ManifestBuilder, ManifestSource,
 };
@@ -18,17 +19,22 @@ async fn non_empty_manifest_publishes_one_body_free_recap_request()
     let manifest_id = Uuid::now_v7();
     let marker = format!("private-source-{}", Uuid::now_v7());
     let manifest = ManifestBuilder::build(
+        manifest_id,
+        owner,
         run_id,
         "2026-08-20T10:00:00Z",
         "2026-08-21T10:00:00Z",
-        vec![ManifestSource {
+        &[ManifestSource {
             revision_id: Uuid::now_v7(),
+            channel_id: Uuid::now_v7(),
             channel_username: "example_channel".into(),
+            channel_display_name: None,
             message_id: 42,
-            content_sha256: "11".repeat(32),
+            content_sha256: sha256_hex(marker.as_bytes()),
             published_at: "2026-08-20T12:00:00Z".into(),
             canonical_link: "https://t.me/example_channel/42".into(),
             body: marker.clone(),
+            revision_index: 1,
         }],
     )?;
     let request = serde_json::to_vec(&serde_json::json!({
@@ -46,15 +52,11 @@ async fn non_empty_manifest_publishes_one_body_free_recap_request()
     }))?;
     let coordinator = DigestCoordinator::new(database.pool().clone());
     assert_eq!(
-        coordinator
-            .commit_manifest(manifest_id, owner, &manifest, Some(&request))
-            .await?,
+        coordinator.commit_manifest(&manifest, &request).await?,
         IntakeOutcome::Applied
     );
     assert_eq!(
-        coordinator
-            .commit_manifest(manifest_id, owner, &manifest, Some(&request))
-            .await?,
+        coordinator.commit_manifest(&manifest, &request).await?,
         IntakeOutcome::Replayed
     );
     let outbox: (i64, i64) = sqlx::query_as(
@@ -65,33 +67,23 @@ async fn non_empty_manifest_publishes_one_body_free_recap_request()
     .fetch_one(database.pool())
     .await?;
     assert_eq!(outbox, (1, 0));
-
-    let empty_run = create_run(database.pool(), owner, "empty-key").await?;
-    let empty = ManifestBuilder::build(
-        empty_run,
-        "2026-08-20T10:00:00Z",
-        "2026-08-21T10:00:00Z",
-        Vec::new(),
-    )?;
+    let stored: (String,) = sqlx::query_as(
+        "select canonical_text from channel_digests.digest_manifests where manifest_id = $1",
+    )
+    .bind(manifest_id)
+    .fetch_one(database.pool())
+    .await?;
     assert_eq!(
-        coordinator
-            .commit_manifest(Uuid::now_v7(), owner, &empty, None)
-            .await?,
-        IntakeOutcome::Applied
+        stored.0, manifest.text,
+        "the exact canonical text is stored, source content included, outside the outbox"
     );
-    let state: (String,) =
-        sqlx::query_as("select state from channel_digests.digest_runs where run_id = $1")
-            .bind(empty_run)
-            .fetch_one(database.pool())
-            .await?;
-    assert_eq!(state.0, "completed");
     database.close().await;
     Ok(())
 }
 
 async fn create_run(pool: &sqlx::PgPool, owner: Uuid, key: &str) -> Result<Uuid, sqlx::Error> {
     let row: (Uuid,) = sqlx::query_as(
-        "select channel_digests.create_digest_run($1, $2, 'on_demand', $3, '2026-08-20T10:00:00Z', '2026-08-21T10:00:00Z')",
-    ).bind(Uuid::now_v7()).bind(owner).bind(key).fetch_one(pool).await?;
+        "select channel_digests.create_digest_run($1, $2, $3, 'on_demand', $4, '2026-08-20T10:00:00Z', '2026-08-21T10:00:00Z')",
+    ).bind(Uuid::now_v7()).bind(owner).bind(Uuid::now_v7()).bind(key).fetch_one(pool).await?;
     Ok(row.0)
 }

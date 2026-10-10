@@ -30,6 +30,9 @@ pub enum RuntimeError {
     /// The API-only Knowledge result reader could not be composed.
     #[error("Knowledge result reader is unavailable")]
     ResultReader,
+    /// The daily digest schedule registration could not be queued.
+    #[error("channel digest schedule registration is unavailable")]
+    Registration,
     /// A joined server task failed or exceeded the shutdown bound.
     #[error("channel digest process did not drain cleanly")]
     Drain,
@@ -141,12 +144,10 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
     let operator = tokio::net::TcpListener::bind(config.operator.listen_address)
         .await
         .map_err(|_| RuntimeError::Listener)?;
-    let endpoint = config
-        .bus
-        .as_ref()
-        .ok_or(RuntimeError::Listener)?
-        .endpoint
-        .clone();
+    let bus = config.bus.clone().ok_or(RuntimeError::Listener)?;
+    crate::registration::enqueue_schedule_registration(database.pool(), config.schedule.as_ref())
+        .await
+        .map_err(|_| RuntimeError::Registration)?;
     let (drain_tx, drain_rx) = watch::channel(false);
     let server = tokio::spawn(serve(
         operator,
@@ -156,7 +157,13 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
     let worker_pool = database.pool().clone();
     let bus_readiness = readiness.clone();
     let worker = tokio::spawn(async move {
-        crate::bus::supervise_bus(endpoint, worker_pool, bus_readiness, drain_rx).await;
+        Box::pin(crate::bus::supervise_bus(
+            bus,
+            worker_pool,
+            bus_readiness,
+            drain_rx,
+        ))
+        .await;
         Ok::<(), RuntimeError>(())
     });
     let provider_config = config

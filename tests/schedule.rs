@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use ratatoskr_channel_digests::{
-    Database, DigestCoordinator, IntakeOutcome, SubscriptionRepository,
+    Database, DigestCoordinator, IntakeOutcome, OccurrenceRequest, SubscriptionRepository,
 };
 use uuid::Uuid;
 
@@ -45,28 +45,21 @@ async fn occurrences_fan_out_once_through_the_run_engine() -> Result<(), Box<dyn
     let occurrence = format!("schedule-occurrence:{}", Uuid::now_v7());
     let payload = serde_json::to_vec(&serde_json::json!({"occurrence_ref": occurrence}))?;
     let message_id = Uuid::now_v7();
+    let request = OccurrenceRequest {
+        message_id,
+        payload: &payload,
+        occurrence_key: &occurrence,
+        previous_due_at: "1999-12-30T10:00:00Z",
+        due_at: "1999-12-31T10:00:00Z",
+        operation_id: Uuid::now_v7(),
+        owner_id: Uuid::now_v7(),
+    };
     assert_eq!(
-        coordinator
-            .accept_occurrence(
-                message_id,
-                &payload,
-                &occurrence,
-                "1999-12-30T10:00:00Z",
-                "1999-12-31T10:00:00Z",
-            )
-            .await?,
+        coordinator.accept_occurrence(&request).await?,
         IntakeOutcome::Applied
     );
     assert_eq!(
-        coordinator
-            .accept_occurrence(
-                message_id,
-                &payload,
-                &occurrence,
-                "1999-12-30T10:00:00Z",
-                "1999-12-31T10:00:00Z",
-            )
-            .await?,
+        coordinator.accept_occurrence(&request).await?,
         IntakeOutcome::Replayed
     );
     let counts: (i64, i64) = sqlx::query_as(

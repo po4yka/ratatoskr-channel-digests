@@ -60,7 +60,7 @@ async fn exact_envelopes_drive_one_durable_effect() -> Result<(), Box<dyn std::e
     )
     .bind(command_id)
     .bind(owner)
-    .bind(&idempotency_key)
+    .bind(format!("operation:{operation_id}:succeeded"))
     .fetch_one(database.pool())
     .await?;
     assert_eq!(counts, (1, 1, 1));
@@ -125,12 +125,13 @@ async fn run_envelope_preserves_selected_identity_and_replays()
     let durable: (Uuid, i64, i64) = sqlx::query_as(
         "select r.run_id,
                 (select count(*) from channel_digests.inbox_messages where message_id = $1),
-                (select count(*) from channel_digests.outbox_messages where semantic_key = $2)
+                (select count(*) from channel_digests.outbox_messages where semantic_key = $4)
          from channel_digests.digest_runs r where r.owner_id = $3 and r.idempotency_key = $2",
     )
     .bind(command_id)
     .bind(&idempotency_key)
     .bind(owner)
+    .bind(format!("operation:{operation_id}:running"))
     .fetch_one(database.pool())
     .await?;
     assert_eq!(durable, (run_id, 1, 1));
@@ -194,6 +195,97 @@ async fn schedule_occurrence_envelope_fans_out_once_to_active_owners()
     .fetch_one(database.pool())
     .await?;
     assert_eq!(counts, (1, 1));
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn schedule_occurrence_accepts_a_platform_contract_envelope_and_terminates_its_operation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let subscriber = Uuid::now_v7();
+    let schedule_owner = Uuid::now_v7();
+    SubscriptionRepository::new(database.pool().clone())
+        .set(
+            subscriber,
+            "occurrence_contract_channel",
+            true,
+            "2026-08-19T10:00:00Z",
+        )
+        .await?;
+    let occurrence_id = Uuid::now_v7();
+    let operation_id = Uuid::now_v7();
+    let envelope = serde_json::json!({
+        "command_id": occurrence_id,
+        "command_type": "channel_digest.schedule.occurrence_requested.v1",
+        "issued_at": "2026-08-21T10:00:01Z",
+        "producer": "ratatoskr-platform",
+        "aggregate_id": format!("schedule-occurrence:{occurrence_id}"),
+        "correlation_id": format!("operation:{operation_id}"),
+        "tenant_id": format!("user:{schedule_owner}"),
+        "schema_version": 1,
+        "payload": {
+            "schedule_ref": format!("schedule:{}", Uuid::now_v7()),
+            "occurrence_ref": format!("schedule-occurrence:{occurrence_id}"),
+            "previous_due_at": "2026-08-20T10:00:00Z",
+            "due_at": "2026-08-21T10:00:00Z"
+        }
+    });
+    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let subject = "cmd.channel_digest.schedule.occurrence_requested.v1";
+
+    for _ in 0..2 {
+        assert_eq!(
+            handler
+                .handle(subject, &serde_json::to_vec(&envelope)?)
+                .await,
+            DeliveryDisposition::Ack
+        );
+    }
+
+    let reports: (i64, i64) = sqlx::query_as(
+        "select count(*), count(*) filter (where owner_id = $2 and payload->>'status' = 'succeeded' and payload->>'stage' = 'fanned_out')
+         from channel_digests.outbox_messages
+         where subject = 'platform.operation.reported.v1' and operation_id = $1",
+    )
+    .bind(operation_id)
+    .bind(schedule_owner)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        reports,
+        (1, 1),
+        "one succeeded report on the occurrence operation, owned by the schedule owner"
+    );
+    let run_operation: (Uuid,) = sqlx::query_as(
+        "select operation_id from channel_digests.digest_runs where owner_id = $1 and idempotency_key = $2",
+    )
+    .bind(subscriber)
+    .bind(format!("schedule-occurrence:{occurrence_id}"))
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        run_operation.0, operation_id,
+        "fanned-out runs carry the occurrence operation"
+    );
+    let mut without_tenant = envelope.clone();
+    without_tenant
+        .as_object_mut()
+        .ok_or("envelope object")?
+        .remove("tenant_id");
+    let mut foreign_correlation = envelope.clone();
+    foreign_correlation["correlation_id"] = serde_json::json!(format!("event:{}", Uuid::now_v7()));
+    for malformed in [without_tenant, foreign_correlation] {
+        assert_eq!(
+            handler
+                .handle(subject, &serde_json::to_vec(&malformed)?)
+                .await,
+            DeliveryDisposition::Term,
+            "an occurrence without its operation or owner must be terminated"
+        );
+    }
     database.close().await;
     Ok(())
 }

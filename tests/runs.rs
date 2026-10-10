@@ -66,10 +66,11 @@ async fn windows_replay_leases_and_terminal_state_are_deterministic()
 
 async fn create_run(pool: &sqlx::PgPool, run_id: Uuid, owner: Uuid) -> Result<Uuid, sqlx::Error> {
     let row: (Uuid,) = sqlx::query_as(
-        "select channel_digests.create_digest_run($1, $2, 'on_demand', 'same-key', '2026-08-20T10:00:00Z', '2026-08-21T10:00:00Z')",
+        "select channel_digests.create_digest_run($1, $2, $3, 'on_demand', 'same-key', '2026-08-20T10:00:00Z', '2026-08-21T10:00:00Z')",
     )
     .bind(run_id)
     .bind(owner)
+    .bind(Uuid::now_v7())
     .fetch_one(pool)
     .await?;
     Ok(row.0)

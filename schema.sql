@@ -137,6 +137,7 @@ $$;
 create table if not exists channel_digests.digest_runs (
     run_id uuid primary key,
     owner_id uuid not null,
+    operation_id uuid not null,
     trigger text not null check (trigger in ('on_demand', 'scheduled')),
     idempotency_key text not null,
     window_start timestamptz not null,
@@ -174,6 +175,7 @@ $$;
 create or replace function channel_digests.create_digest_run(
     requested_run_id uuid,
     requested_owner_id uuid,
+    requested_operation_id uuid,
     requested_trigger text,
     requested_idempotency_key text,
     requested_window_start timestamptz,
@@ -183,9 +185,10 @@ language sql
 as $$
     with inserted as (
         insert into channel_digests.digest_runs (
-            run_id, owner_id, trigger, idempotency_key, window_start, window_end, state
+            run_id, owner_id, operation_id, trigger, idempotency_key, window_start, window_end, state
         ) values (
-            requested_run_id, requested_owner_id, requested_trigger, requested_idempotency_key,
+            requested_run_id, requested_owner_id, requested_operation_id, requested_trigger,
+            requested_idempotency_key,
             requested_window_start, requested_window_end, 'accepted'
         )
         on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing
@@ -228,9 +231,9 @@ create table if not exists channel_digests.digest_manifests (
     run_id uuid not null unique references channel_digests.digest_runs(run_id),
     owner_id uuid not null,
     sha256 text not null check (length(sha256) = 64),
-    source_count integer not null check (source_count between 0 and 100),
-    channel_count integer not null check (channel_count between 0 and 20),
-    canonical_json jsonb not null,
+    source_count integer not null check (source_count between 1 and 100),
+    channel_count integer not null check (channel_count between 1 and 20),
+    canonical_text text not null,
     created_at timestamptz not null default now(),
     unique (owner_id, manifest_id)
 );
@@ -277,10 +280,15 @@ create table if not exists channel_digests.inbox_messages (
 
 create table if not exists channel_digests.outbox_messages (
     outbox_id uuid primary key,
-    subject text not null,
+    subject text not null check (subject in (
+        'knowledge.channel_digest_recap.requested.v1',
+        'platform.operation.reported.v1',
+        'platform.schedule.registration_requested.v1'
+    )),
     semantic_key text not null,
     owner_id uuid not null,
-    operation_id uuid not null,
+    operation_id uuid,
+    causation_ref text,
     payload jsonb not null,
     created_at timestamptz not null default now(),
     published_at timestamptz,

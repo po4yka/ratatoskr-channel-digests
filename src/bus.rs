@@ -1,5 +1,6 @@
 //! Exact `JetStream` delivery boundary for the channel-digest worker.
 
+use std::path::Path;
 use std::time::Duration;
 
 use async_nats::jetstream;
@@ -17,8 +18,10 @@ use ratatoskr_identifiers::WireTimestamp;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::config::BusConfig;
+use crate::envelopes::{OutboundMessage, OutboxRow, wrap_outbox_row};
 use crate::runtime::WorkerReadiness;
-use crate::{CommandIntake, CoordinatorError, DigestCoordinator, IntakeError};
+use crate::{CommandIntake, CoordinatorError, DigestCoordinator, IntakeError, OccurrenceRequest};
 
 const SUBSCRIPTION_SUBJECT: &str = "cmd.channel_digest.subscription.set_requested.v1";
 const RUN_SUBJECT: &str = "cmd.channel_digest.run.requested.v1";
@@ -35,9 +38,23 @@ const SCHEDULE_DURABLE: &str = "ratatoskr_channel_digest_schedule_occurrences";
 const COMPLETED_DURABLE: &str = "ratatoskr_channel_digest_recap_completed";
 const FAILED_DURABLE: &str = "ratatoskr_channel_digest_recap_failed";
 
+/// Safe bus failure vocabulary. It never carries payloads, subjects of foreign tenants, or
+/// credentials.
 #[derive(Debug, thiserror::Error)]
-#[error("channel digest bus dependency is unavailable")]
-pub(crate) struct BusRuntimeError;
+#[non_exhaustive]
+pub enum BusError {
+    /// Connection, topology, or transport failed.
+    #[error("channel digest bus dependency is unavailable")]
+    Unavailable,
+    /// A publish was not acknowledged. A permission denial looks exactly like this to a client.
+    #[error(
+        "the bus did not acknowledge a published message; check the NATS server log for a Publish Violation"
+    )]
+    Unacknowledged,
+    /// An outbox row cannot be wrapped into a contract envelope.
+    #[error("an outbox row cannot be wrapped into a contract envelope")]
+    Unwrappable,
+}
 
 /// Provider acknowledgement selected after durable message handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,14 +116,19 @@ impl WorkerMessageHandler {
             let Ok(payload) = serde_json::to_vec(&command) else {
                 return DeliveryDisposition::Term;
             };
+            let Some((operation_id, owner_id)) = occurrence_authority(&envelope) else {
+                return DeliveryDisposition::Term;
+            };
             return match DigestCoordinator::new(self.pool.clone())
-                .accept_occurrence(
-                    envelope.command_id.0,
-                    &payload,
-                    command.occurrence_ref.as_str(),
-                    &command.previous_due_at.to_string(),
-                    &command.due_at.to_string(),
-                )
+                .accept_occurrence(&OccurrenceRequest {
+                    message_id: envelope.command_id.0,
+                    payload: &payload,
+                    occurrence_key: command.occurrence_ref.as_str(),
+                    previous_due_at: &command.previous_due_at.to_string(),
+                    due_at: &command.due_at.to_string(),
+                    operation_id,
+                    owner_id,
+                })
                 .await
             {
                 Ok(_) => DeliveryDisposition::Ack,
@@ -215,14 +237,148 @@ impl WorkerMessageHandler {
     }
 }
 
+/// The occurrence operation and its owner, both carried by the Platform envelope.
+fn occurrence_authority(envelope: &CommandEnvelope) -> Option<(Uuid, Uuid)> {
+    let correlation = &envelope.correlation_id;
+    let operation = if correlation.kind().as_str() == "operation" {
+        correlation.as_uuid()?
+    } else {
+        return None;
+    };
+    Some((operation, envelope.tenant_id?.user_id().0))
+}
+
+/// Expected acknowledgement wait of every durable Edge provisions for this service.
+const ACK_WAIT: Duration = Duration::from_secs(30);
+
+/// Connects to the broker, authenticating with an nkey seed when a path is given.
+///
+/// The seed is read from the file at connection time, never logged, and dropped after the
+/// connection options are built.
+///
+/// # Errors
+///
+/// Returns [`BusError::Unavailable`] when the seed cannot be read or the broker refuses the
+/// connection.
+pub async fn connect(
+    endpoint: &str,
+    nkey_seed_path: Option<&Path>,
+) -> Result<async_nats::Client, BusError> {
+    let options = match nkey_seed_path {
+        Some(path) => {
+            let seed = tokio::fs::read_to_string(path)
+                .await
+                .map_err(|_| BusError::Unavailable)?;
+            async_nats::ConnectOptions::with_nkey(seed.trim().to_owned())
+        }
+        None => async_nats::ConnectOptions::new(),
+    };
+    options
+        .connect(endpoint)
+        .await
+        .map_err(|_| BusError::Unavailable)
+}
+
+/// Publishes one wrapped message and waits for the broker's acknowledgement.
+///
+/// # Errors
+///
+/// Returns [`BusError::Unavailable`] when the publish cannot be sent and
+/// [`BusError::Unacknowledged`] when no acknowledgement arrives, which is also what a denied
+/// publish looks like to the client.
+pub async fn publish_message(
+    context: &jetstream::Context,
+    message: &OutboundMessage,
+) -> Result<(), BusError> {
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("Nats-Msg-Id", message.message_id.to_string());
+    context
+        .publish_with_headers(
+            message.subject.clone(),
+            headers,
+            message.bytes.clone().into(),
+        )
+        .await
+        .map_err(|_| BusError::Unavailable)?
+        .await
+        .map_err(|_| BusError::Unacknowledged)?;
+    Ok(())
+}
+
+/// The five Edge-provisioned durables this worker consumes, each verified against its spec.
+pub struct ConsumerSet {
+    subscriptions: jetstream::consumer::PullConsumer,
+    runs: jetstream::consumer::PullConsumer,
+    schedules: jetstream::consumer::PullConsumer,
+    completed: jetstream::consumer::PullConsumer,
+    failed: jetstream::consumer::PullConsumer,
+}
+
+impl std::fmt::Debug for ConsumerSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConsumerSet")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Fetches every durable this worker consumes and verifies its filter, ack policy and ack wait.
+///
+/// Consumers are verified, never created: Edge provisions them.
+///
+/// # Errors
+///
+/// Returns [`BusError::Unavailable`] when a durable is absent, unreadable, or differs from its
+/// spec.
+pub async fn verify_consumers(context: &jetstream::Context) -> Result<ConsumerSet, BusError> {
+    Ok(ConsumerSet {
+        subscriptions: exact_consumer(
+            context,
+            COMMAND_STREAM,
+            SUBSCRIPTION_DURABLE,
+            SUBSCRIPTION_SUBJECT,
+        )
+        .await?,
+        runs: exact_consumer(context, COMMAND_STREAM, RUN_DURABLE, RUN_SUBJECT).await?,
+        schedules: exact_consumer(context, COMMAND_STREAM, SCHEDULE_DURABLE, SCHEDULE_SUBJECT)
+            .await?,
+        completed: exact_consumer(context, EVENT_STREAM, COMPLETED_DURABLE, COMPLETED_SUBJECT)
+            .await?,
+        failed: exact_consumer(context, EVENT_STREAM, FAILED_DURABLE, FAILED_SUBJECT).await?,
+    })
+}
+
+async fn exact_consumer(
+    context: &jetstream::Context,
+    stream: &str,
+    durable: &str,
+    subject: &str,
+) -> Result<jetstream::consumer::PullConsumer, BusError> {
+    let consumer: jetstream::consumer::PullConsumer = context
+        .get_consumer_from_stream(durable, stream)
+        .await
+        .map_err(|_| BusError::Unavailable)?;
+    let config = &consumer.cached_info().config;
+    if config.durable_name.as_deref() != Some(durable)
+        || config.filter_subject != subject
+        || config.ack_policy != jetstream::consumer::AckPolicy::Explicit
+        || config.ack_wait != ACK_WAIT
+        || config.deliver_subject.is_some()
+        || config.deliver_policy != jetstream::consumer::DeliverPolicy::All
+    {
+        return Err(BusError::Unavailable);
+    }
+    Ok(consumer)
+}
+
 pub(crate) async fn supervise_bus(
-    endpoint: String,
+    bus: BusConfig,
     pool: sqlx::PgPool,
     readiness: WorkerReadiness,
     mut drain: watch::Receiver<bool>,
 ) {
     while !*drain.borrow() {
-        let result = consume_once(&endpoint, &pool, &readiness, &mut drain).await;
+        let result = Box::pin(consume_once(&bus, &pool, &readiness, &mut drain)).await;
         readiness.set_bus(false);
         if *drain.borrow() {
             return;
@@ -244,58 +400,19 @@ pub(crate) async fn supervise_bus(
 }
 
 async fn consume_once(
-    endpoint: &str,
+    bus: &BusConfig,
     pool: &sqlx::PgPool,
     readiness: &WorkerReadiness,
     drain: &mut watch::Receiver<bool>,
-) -> Result<(), BusRuntimeError> {
-    let client = async_nats::connect(endpoint)
-        .await
-        .map_err(|_| BusRuntimeError)?;
+) -> Result<(), BusError> {
+    let client = connect(&bus.endpoint, bus.nkey_seed_path.as_deref()).await?;
     let context = jetstream::new(client);
-    let subscriptions = exact_consumer(
-        &context,
-        COMMAND_STREAM,
-        SUBSCRIPTION_DURABLE,
-        SUBSCRIPTION_SUBJECT,
-    )
-    .await?;
-    let runs = exact_consumer(&context, COMMAND_STREAM, RUN_DURABLE, RUN_SUBJECT).await?;
-    let schedules =
-        exact_consumer(&context, COMMAND_STREAM, SCHEDULE_DURABLE, SCHEDULE_SUBJECT).await?;
-    let completed =
-        exact_consumer(&context, EVENT_STREAM, COMPLETED_DURABLE, COMPLETED_SUBJECT).await?;
-    let failed = exact_consumer(&context, EVENT_STREAM, FAILED_DURABLE, FAILED_SUBJECT).await?;
-    let mut subscription_messages = subscriptions
-        .stream()
-        .max_messages_per_batch(16)
-        .messages()
-        .await
-        .map_err(|_| BusRuntimeError)?;
-    let mut run_messages = runs
-        .stream()
-        .max_messages_per_batch(16)
-        .messages()
-        .await
-        .map_err(|_| BusRuntimeError)?;
-    let mut schedule_messages = schedules
-        .stream()
-        .max_messages_per_batch(16)
-        .messages()
-        .await
-        .map_err(|_| BusRuntimeError)?;
-    let mut completion_messages = completed
-        .stream()
-        .max_messages_per_batch(16)
-        .messages()
-        .await
-        .map_err(|_| BusRuntimeError)?;
-    let mut failure_messages = failed
-        .stream()
-        .max_messages_per_batch(16)
-        .messages()
-        .await
-        .map_err(|_| BusRuntimeError)?;
+    let consumers = verify_consumers(&context).await?;
+    let mut subscription_messages = batches(&consumers.subscriptions).await?;
+    let mut run_messages = batches(&consumers.runs).await?;
+    let mut schedule_messages = batches(&consumers.schedules).await?;
+    let mut completion_messages = batches(&consumers.completed).await?;
+    let mut failure_messages = batches(&consumers.failed).await?;
     let handler = WorkerMessageHandler::new(pool.clone());
     publish_outbox(pool, &context).await?;
     readiness.set_bus(true);
@@ -326,26 +443,15 @@ async fn consume_once(
     }
 }
 
-async fn exact_consumer(
-    context: &jetstream::Context,
-    stream: &str,
-    durable: &str,
-    subject: &str,
-) -> Result<jetstream::consumer::PullConsumer, BusRuntimeError> {
-    let consumer: jetstream::consumer::PullConsumer = context
-        .get_consumer_from_stream(durable, stream)
+async fn batches(
+    consumer: &jetstream::consumer::PullConsumer,
+) -> Result<jetstream::consumer::pull::Stream, BusError> {
+    consumer
+        .stream()
+        .max_messages_per_batch(16)
+        .messages()
         .await
-        .map_err(|_| BusRuntimeError)?;
-    let config = &consumer.cached_info().config;
-    if config.durable_name.as_deref() != Some(durable)
-        || config.filter_subject != subject
-        || config.ack_policy != jetstream::consumer::AckPolicy::Explicit
-        || config.deliver_subject.is_some()
-        || config.deliver_policy != jetstream::consumer::DeliverPolicy::All
-    {
-        return Err(BusRuntimeError);
-    }
-    Ok(consumer)
+        .map_err(|_| BusError::Unavailable)
 }
 
 async fn process_delivery(
@@ -353,8 +459,10 @@ async fn process_delivery(
     handler: &WorkerMessageHandler,
     context: &jetstream::Context,
     pool: &sqlx::PgPool,
-) -> Result<(), BusRuntimeError> {
-    let message = next.ok_or(BusRuntimeError)?.map_err(|_| BusRuntimeError)?;
+) -> Result<(), BusError> {
+    let message = next
+        .ok_or(BusError::Unavailable)?
+        .map_err(|_| BusError::Unavailable)?;
     let disposition = handler
         .handle(message.subject.as_str(), message.payload.as_ref())
         .await;
@@ -364,76 +472,73 @@ async fn process_delivery(
         DeliveryDisposition::Term => jetstream::AckKind::Term,
         DeliveryDisposition::Nak => jetstream::AckKind::Nak(Some(Duration::from_secs(2))),
     };
-    message.ack_with(ack).await.map_err(|_| BusRuntimeError)
+    message
+        .ack_with(ack)
+        .await
+        .map_err(|_| BusError::Unavailable)
 }
 
-async fn publish_outbox(
-    pool: &sqlx::PgPool,
-    context: &jetstream::Context,
-) -> Result<(), BusRuntimeError> {
-    let rows: Vec<(Uuid, String, Uuid, Uuid, serde_json::Value)> = sqlx::query_as(
-        "select outbox_id, subject, owner_id, operation_id, payload
+type StoredOutboxRow = (
+    Uuid,
+    String,
+    Uuid,
+    Option<Uuid>,
+    Option<String>,
+    String,
+    serde_json::Value,
+);
+
+/// Publishes every due outbox row. A row the broker does not acknowledge is backed off and the
+/// remaining rows still go out, so one refused row never starves the others.
+async fn publish_outbox(pool: &sqlx::PgPool, context: &jetstream::Context) -> Result<(), BusError> {
+    let rows: Vec<StoredOutboxRow> = sqlx::query_as(
+        "select outbox_id, subject, owner_id, operation_id, causation_ref,
+                to_char(created_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+                payload
          from channel_digests.outbox_messages
          where published_at is null and next_attempt_at <= now()
-         order by created_at limit 32",
+         order by created_at, outbox_id limit 32",
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| BusRuntimeError)?;
-    for (outbox_id, subject, owner_id, operation_id, payload) in rows {
-        let is_command = subject == "knowledge.channel_digest_recap.requested.v1";
-        let aggregate_id = payload
-            .get("digest_run_id")
-            .and_then(serde_json::Value::as_str)
-            .map_or_else(
-                || format!("operation:{operation_id}"),
-                |run_id| format!("channel-digest-run:{run_id}"),
-            );
-        let envelope = if is_command {
-            serde_json::json!({
-                "command_id": outbox_id,
-                "command_type": subject,
-                "issued_at": WireTimestamp::now(),
-                "producer": "ratatoskr-channel-digests",
-                "aggregate_id": aggregate_id,
-                "correlation_id": format!("operation:{operation_id}"),
-                "tenant_id": format!("user:{owner_id}"),
-                "schema_version": 1,
-                "payload": payload
-            })
-        } else {
-            serde_json::json!({
-                "event_id": outbox_id,
-                "event_type": subject,
-                "occurred_at": WireTimestamp::now(),
-                "producer": "ratatoskr-channel-digests",
-                "aggregate_id": aggregate_id,
-                "correlation_id": format!("operation:{operation_id}"),
-                "tenant_id": format!("user:{owner_id}"),
-                "schema_version": 1,
-                "payload": payload
-            })
+    .map_err(|_| BusError::Unavailable)?;
+    let mut refused = false;
+    for (outbox_id, subject, owner_id, operation_id, causation_ref, created_at, payload) in rows {
+        let row = OutboxRow {
+            outbox_id,
+            subject,
+            owner_id,
+            operation_id,
+            causation_ref,
+            created_at: created_at
+                .parse::<jiff::Timestamp>()
+                .map(WireTimestamp::from_jiff)
+                .map_err(|_| BusError::Unwrappable)?,
+            payload,
         };
-        let bytes = serde_json::to_vec(&envelope).map_err(|_| BusRuntimeError)?;
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert("Nats-Msg-Id", outbox_id.to_string());
-        context
-            .publish_with_headers(
-                format!("{}.{subject}", if is_command { "cmd" } else { "evt" }),
-                headers,
-                bytes.into(),
+        let message = wrap_outbox_row(&row)?;
+        if publish_message(context, &message).await.is_ok() {
+            sqlx::query(
+                "update channel_digests.outbox_messages set published_at = now(), attempts = attempts + 1 where outbox_id = $1 and published_at is null",
             )
+            .bind(outbox_id)
+            .execute(pool)
             .await
-            .map_err(|_| BusRuntimeError)?
+            .map_err(|_| BusError::Unavailable)?;
+        } else {
+            refused = true;
+            sqlx::query(
+                "update channel_digests.outbox_messages set attempts = attempts + 1, safe_failure_class = 'publish_unacknowledged', next_attempt_at = now() + least(300, power(2, least(attempts, 8))) * interval '1 second' where outbox_id = $1 and published_at is null",
+            )
+            .bind(outbox_id)
+            .execute(pool)
             .await
-            .map_err(|_| BusRuntimeError)?;
-        sqlx::query(
-            "update channel_digests.outbox_messages set published_at = now(), attempts = attempts + 1 where outbox_id = $1 and published_at is null",
-        )
-        .bind(outbox_id)
-        .execute(pool)
-        .await
-        .map_err(|_| BusRuntimeError)?;
+            .map_err(|_| BusError::Unavailable)?;
+        }
     }
-    Ok(())
+    if refused {
+        Err(BusError::Unacknowledged)
+    } else {
+        Ok(())
+    }
 }

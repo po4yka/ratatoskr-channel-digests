@@ -36,10 +36,11 @@ async fn typed_commands_are_deduplicated_and_atomic() -> Result<(), Box<dyn std:
     );
 
     let counts: (i64, i64, i64) = sqlx::query_as(
-        "select (select count(*) from channel_digests.inbox_messages where semantic_key = $1), (select count(*) from channel_digests.outbox_messages where semantic_key = $1), (select count(*) from channel_digests.subscriptions where owner_id = $2)",
+        "select (select count(*) from channel_digests.inbox_messages where semantic_key = $1), (select count(*) from channel_digests.outbox_messages where semantic_key = $3), (select count(*) from channel_digests.subscriptions where owner_id = $2)",
     )
     .bind(&semantic)
     .bind(owner)
+    .bind(format!("operation:{operation}:succeeded"))
     .fetch_one(database.pool())
     .await?;
     assert_eq!(counts, (1, 1, 1));

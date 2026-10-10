@@ -4,6 +4,13 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use ratatoskr_identifiers::UserId;
+use ratatoskr_operation_contracts::ScheduleCronExpression;
+use uuid::Uuid;
+
+/// Default daily digest schedule, 06:00 UTC.
+const DEFAULT_SCHEDULE_CRON: &str = "0 6 * * *";
+
 /// Executable role selected before configuration is decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -104,6 +111,20 @@ impl ProviderConfig {
 pub struct BusConfig {
     /// Fixed NATS endpoint.
     pub endpoint: String,
+    /// Absolute path of the nkey seed file this identity authenticates with, when the broker
+    /// requires authorization. The seed is read at connection time and never logged.
+    pub nkey_seed_path: Option<PathBuf>,
+}
+
+/// The daily digest schedule this service registers with Platform at worker start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleConfig {
+    /// Platform user that owns the schedule and its occurrence operations.
+    pub owner_user_id: Uuid,
+    /// Five-field UTC cron expression.
+    pub cron_expression: String,
+    /// Whether the schedule fires.
+    pub enabled: bool,
 }
 
 /// API-only authority and finite policy for reading completed recaps from Knowledge.
@@ -145,6 +166,8 @@ pub struct Config {
     pub provider: Option<ProviderConfig>,
     /// Present only for the worker role.
     pub bus: Option<BusConfig>,
+    /// Present only for the worker role, and only when a schedule owner is configured.
+    pub schedule: Option<ScheduleConfig>,
     /// Present only for the API role.
     pub knowledge_result_reader: Option<KnowledgeResultReaderConfig>,
     service_secret: Secret,
@@ -214,6 +237,10 @@ struct Builder {
     session_file: Option<PathBuf>,
     session_key_file: Option<PathBuf>,
     bus_endpoint: Option<String>,
+    bus_nkey_seed_path: Option<PathBuf>,
+    schedule_owner: Option<Uuid>,
+    schedule_cron: Option<String>,
+    schedule_enabled: Option<bool>,
     knowledge_base_url: Option<String>,
     knowledge_result_reader_service_secret: Option<Secret>,
     knowledge_connect_timeout_ms: Option<u64>,
@@ -235,6 +262,10 @@ impl Builder {
             session_file: None,
             session_key_file: None,
             bus_endpoint: None,
+            bus_nkey_seed_path: None,
+            schedule_owner: None,
+            schedule_cron: None,
+            schedule_enabled: None,
             knowledge_base_url: None,
             knowledge_result_reader_service_secret: None,
             knowledge_connect_timeout_ms: None,
@@ -277,6 +308,28 @@ impl Builder {
             }
             "RATATOSKR__BUS__ENDPOINT" if self.role == Role::Worker => {
                 self.bus_endpoint = Some(nonempty(key, value)?.to_owned());
+            }
+            "RATATOSKR__BUS__NKEY_SEED_PATH" if self.role == Role::Worker => {
+                self.bus_nkey_seed_path = Some(absolute_path(key, value)?);
+            }
+            "RATATOSKR__SCHEDULE__OWNER_USER_ID" if self.role == Role::Worker => {
+                self.schedule_owner = Some(
+                    UserId::parse(value)
+                        .map(|user| user.0)
+                        .map_err(|_| ConfigError::new(key, "must be a canonical user UUID"))?,
+                );
+            }
+            "RATATOSKR__SCHEDULE__CRON" if self.role == Role::Worker => {
+                self.schedule_cron = Some(
+                    ScheduleCronExpression::parse(value)
+                        .map(|cron| cron.as_str().to_owned())
+                        .map_err(|_| {
+                            ConfigError::new(key, "must be a five-field UTC cron expression")
+                        })?,
+                );
+            }
+            "RATATOSKR__SCHEDULE__ENABLED" if self.role == Role::Worker => {
+                self.schedule_enabled = Some(parse_bool(key, value)?);
             }
             "RATATOSKR__KNOWLEDGE__BASE_URL" if self.role == Role::Api => {
                 self.knowledge_base_url = Some(loopback_http_base_url(key, value)?);
@@ -327,6 +380,7 @@ impl Builder {
     }
 
     fn finish(self) -> Result<Config, ConfigError> {
+        let schedule = self.schedule()?;
         let database_url = required(self.database_url, "RATATOSKR__DATABASE__URL")?;
         let service_secret = required(self.service_secret, "RATATOSKR__AUTH__SERVICE_SECRET")?;
         let (provider, bus, knowledge_result_reader) = match self.role {
@@ -379,6 +433,7 @@ impl Builder {
                 }),
                 Some(BusConfig {
                     endpoint: required(self.bus_endpoint, "RATATOSKR__BUS__ENDPOINT")?,
+                    nkey_seed_path: self.bus_nkey_seed_path,
                 }),
                 None,
             ),
@@ -399,9 +454,39 @@ impl Builder {
             limits: self.limits,
             provider,
             bus,
+            schedule,
             knowledge_result_reader,
             service_secret,
         })
+    }
+
+    /// The schedule to register, absent without an owner and an error when only a part is set.
+    fn schedule(&self) -> Result<Option<ScheduleConfig>, ConfigError> {
+        let Some(owner_user_id) = self.schedule_owner else {
+            if self.schedule_cron.is_some() || self.schedule_enabled.is_some() {
+                return Err(ConfigError::new(
+                    "RATATOSKR__SCHEDULE__OWNER_USER_ID",
+                    "is required",
+                ));
+            }
+            return Ok(None);
+        };
+        Ok(Some(ScheduleConfig {
+            owner_user_id,
+            cron_expression: self
+                .schedule_cron
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SCHEDULE_CRON.to_owned()),
+            enabled: self.schedule_enabled.unwrap_or(true),
+        }))
+    }
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ConfigError::new(key, "must be true or false")),
     }
 }
 

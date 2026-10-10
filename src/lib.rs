@@ -9,11 +9,14 @@ mod bus;
 mod config;
 mod coordinator;
 mod database;
+mod envelopes;
 mod executor;
 mod intake;
 mod maintenance;
 mod manifest;
 mod provider;
+mod registration;
+mod reports;
 mod result_reader;
 mod revisions;
 mod runs;
@@ -22,10 +25,14 @@ mod session;
 mod subscriptions;
 
 pub use acquisition::{AcquisitionEngine, AcquisitionError, AcquisitionReport, AcquisitionRequest};
-pub use bus::{DeliveryDisposition, WorkerMessageHandler};
-pub use config::{Config, ConfigError, Role};
-pub use coordinator::{CoordinatorError, DigestCoordinator};
+pub use bus::{
+    BusError, ConsumerSet, DeliveryDisposition, WorkerMessageHandler, connect, publish_message,
+    verify_consumers,
+};
+pub use config::{BusConfig, Config, ConfigError, Role, ScheduleConfig};
+pub use coordinator::{CoordinatorError, DigestCoordinator, OccurrenceRequest};
 pub use database::{Database, DatabaseError};
+pub use envelopes::{OutboundMessage, OutboxRow, wrap_outbox_row};
 pub use executor::{RunExecutionError, RunExecutor};
 pub use intake::{CommandIntake, IntakeError, IntakeOutcome};
 pub use maintenance::{Maintenance, MaintenanceError};
@@ -34,6 +41,7 @@ pub use provider::{
     MtProtoPublicChannelProvider, ProviderError, ProviderPage, ProviderPost, PublicChannelProvider,
     PublicChannelUsername, ResolvedPublicChannel,
 };
+pub use registration::{RegistrationError, RegistrationOutcome, enqueue_schedule_registration};
 pub use result_reader::{
     KnowledgeResultProjection, KnowledgeResultReadError, KnowledgeResultReader,
 };

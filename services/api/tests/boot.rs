@@ -148,19 +148,20 @@ async fn seed_result(pool: &sqlx::PgPool) -> Result<SeededResult, sqlx::Error> {
     let manifest_id = Uuid::now_v7();
     sqlx::query(
         "insert into channel_digests.digest_runs \
-         (run_id, owner_id, trigger, idempotency_key, window_start, window_end, state) \
-         values ($1, $2, 'on_demand', $3, '2026-08-20T10:00:00Z', \
+         (run_id, owner_id, operation_id, trigger, idempotency_key, window_start, window_end, state) \
+         values ($1, $2, $4, 'on_demand', $3, '2026-08-20T10:00:00Z', \
          '2026-08-21T10:00:00Z', 'completed')",
     )
     .bind(run_id)
     .bind(seeded.owner_id)
     .bind(format!("boot-result-{}", seeded.result_id))
+    .bind(Uuid::now_v7())
     .execute(pool)
     .await?;
     sqlx::query(
         "insert into channel_digests.digest_manifests \
-         (manifest_id, run_id, owner_id, sha256, source_count, channel_count, canonical_json) \
-         values ($1, $2, $3, $4, 1, 1, jsonb_build_object('fixture', true))",
+         (manifest_id, run_id, owner_id, sha256, source_count, channel_count, canonical_text) \
+         values ($1, $2, $3, $4, 1, 1, '{\"fixture\":true}')",
     )
     .bind(manifest_id)
     .bind(run_id)

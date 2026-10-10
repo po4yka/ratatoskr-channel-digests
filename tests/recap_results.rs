@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::sha256_hex;
 use ratatoskr_channel_digests::{
-    Database, DigestCoordinator, IntakeOutcome, ManifestBuilder, ManifestSource,
+    CanonicalManifest, Database, DigestCoordinator, IntakeOutcome, ManifestBuilder, ManifestSource,
 };
 use uuid::Uuid;
 
@@ -15,29 +16,11 @@ async fn only_consistent_terminal_facts_settle_a_run() -> Result<(), Box<dyn std
     let owner = Uuid::now_v7();
     let run_id = create_run(database.pool(), owner).await?;
     let manifest_id = Uuid::now_v7();
-    let manifest = ManifestBuilder::build(
-        run_id,
-        "2026-08-20T10:00:00Z",
-        "2026-08-21T10:00:00Z",
-        vec![ManifestSource {
-            revision_id: Uuid::now_v7(),
-            channel_username: "example_channel".into(),
-            message_id: 42,
-            content_sha256: "11".repeat(32),
-            published_at: "2026-08-20T12:00:00Z".into(),
-            canonical_link: "https://t.me/example_channel/42".into(),
-            body: "synthetic".into(),
-        }],
-    )?;
+    let manifest = build_manifest(manifest_id, owner, run_id, "synthetic")?;
     let coordinator = DigestCoordinator::new(database.pool().clone());
     let request = recap_request(owner, run_id, manifest_id, &manifest.sha256);
     coordinator
-        .commit_manifest(
-            manifest_id,
-            owner,
-            &manifest,
-            Some(&serde_json::to_vec(&request)?),
-        )
+        .commit_manifest(&manifest, &serde_json::to_vec(&request)?)
         .await
         .map_err(|error| format!("manifest commit failed: {error:?}"))?;
 
@@ -207,32 +190,12 @@ async fn consistent_failure_is_terminal_and_replay_safe() -> Result<(), Box<dyn 
     let owner = Uuid::now_v7();
     let run_id = create_run(database.pool(), owner).await?;
     let manifest_id = Uuid::now_v7();
-    let manifest = ManifestBuilder::build(
-        run_id,
-        "2026-08-20T10:00:00Z",
-        "2026-08-21T10:00:00Z",
-        vec![ManifestSource {
-            revision_id: Uuid::now_v7(),
-            channel_username: "failure_channel".into(),
-            message_id: 7,
-            content_sha256: "33".repeat(32),
-            published_at: "2026-08-20T12:00:00Z".into(),
-            canonical_link: "https://t.me/failure_channel/7".into(),
-            body: "synthetic failure source".into(),
-        }],
-    )?;
+    let manifest = build_manifest(manifest_id, owner, run_id, "synthetic failure source")?;
     let coordinator = DigestCoordinator::new(database.pool().clone());
     coordinator
         .commit_manifest(
-            manifest_id,
-            owner,
             &manifest,
-            Some(&serde_json::to_vec(&recap_request(
-                owner,
-                run_id,
-                manifest_id,
-                &manifest.sha256,
-            ))?),
+            &serde_json::to_vec(&recap_request(owner, run_id, manifest_id, &manifest.sha256))?,
         )
         .await?;
     let failure = serde_json::json!({
@@ -294,7 +257,34 @@ fn completion(owner: Uuid, run: Uuid, result: Uuid, digest: &str) -> serde_json:
 
 async fn create_run(pool: &sqlx::PgPool, owner: Uuid) -> Result<Uuid, sqlx::Error> {
     let row: (Uuid,) = sqlx::query_as(
-        "select channel_digests.create_digest_run($1, $2, 'on_demand', $3, '2026-08-20T10:00:00Z', '2026-08-21T10:00:00Z')",
-    ).bind(Uuid::now_v7()).bind(owner).bind(format!("result-{}", Uuid::now_v7())).fetch_one(pool).await?;
+        "select channel_digests.create_digest_run($1, $2, $3, 'on_demand', $4, '2026-08-20T10:00:00Z', '2026-08-21T10:00:00Z')",
+    ).bind(Uuid::now_v7()).bind(owner).bind(Uuid::now_v7()).bind(format!("result-{}", Uuid::now_v7())).fetch_one(pool).await?;
     Ok(row.0)
+}
+
+fn build_manifest(
+    manifest_id: Uuid,
+    owner: Uuid,
+    run_id: Uuid,
+    body: &str,
+) -> Result<CanonicalManifest, Box<dyn std::error::Error>> {
+    Ok(ManifestBuilder::build(
+        manifest_id,
+        owner,
+        run_id,
+        "2026-08-20T10:00:00Z",
+        "2026-08-21T10:00:00Z",
+        &[ManifestSource {
+            revision_id: Uuid::now_v7(),
+            channel_id: Uuid::now_v7(),
+            channel_username: "example_channel".into(),
+            channel_display_name: None,
+            message_id: 42,
+            content_sha256: sha256_hex(body.as_bytes()),
+            published_at: "2026-08-20T12:00:00Z".into(),
+            canonical_link: "https://t.me/example_channel/42".into(),
+            body: body.into(),
+            revision_index: 1,
+        }],
+    )?)
 }

@@ -2,12 +2,15 @@
 
 use uuid::Uuid;
 
+use crate::reports::{self, OperationReportRow, ReportError};
 use crate::{CanonicalManifest, IntakeOutcome};
 use ratatoskr_channel_digest_contracts::{
     ChannelDigestRecapFailureCode, KnowledgeChannelDigestRecapCompleted,
     KnowledgeChannelDigestRecapFailed, KnowledgeChannelDigestRecapRequested,
 };
+use ratatoskr_operation_contracts::OperationStatus;
 use sha2::Digest as _;
+use sqlx::PgConnection;
 
 /// Safe digest coordination failure.
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +22,77 @@ pub enum CoordinatorError {
     /// Atomic storage operation failed.
     #[error("digest coordination is unavailable")]
     Storage,
+}
+
+impl From<ReportError> for CoordinatorError {
+    fn from(error: ReportError) -> Self {
+        match error {
+            ReportError::Invalid => Self::Invalid,
+            ReportError::Storage => Self::Storage,
+        }
+    }
+}
+
+/// Closed reason a run ends without a recap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunFailure {
+    /// Every subscribed channel was unavailable.
+    ProviderUnavailable,
+    /// The selected sources cannot form a valid manifest.
+    ManifestInvalid,
+}
+
+impl RunFailure {
+    fn class(self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::ManifestInvalid => "manifest_invalid",
+        }
+    }
+
+    fn stage(self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => "acquiring",
+            Self::ManifestInvalid => "manifest",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => "channel_digest.provider_unavailable",
+            Self::ManifestInvalid => "channel_digest.manifest_invalid",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => "The channel posts could not be read from Telegram.",
+            Self::ManifestInvalid => "The selected posts cannot form a digest manifest.",
+        }
+    }
+
+    fn retryable(self) -> bool {
+        matches!(self, Self::ProviderUnavailable)
+    }
+}
+
+/// One authoritative schedule occurrence delivered by Platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccurrenceRequest<'a> {
+    /// Transport identity of the delivered command.
+    pub message_id: Uuid,
+    /// Canonical typed payload bytes, hashed for replay detection.
+    pub payload: &'a [u8],
+    /// Stable `schedule-occurrence:<uuid>` reference used as the semantic key.
+    pub occurrence_key: &'a str,
+    /// Previous grid point, used as the lower fan-out bound.
+    pub previous_due_at: &'a str,
+    /// Current grid point, the exclusive window end.
+    pub due_at: &'a str,
+    /// Platform operation minted for this occurrence.
+    pub operation_id: Uuid,
+    /// Platform user that owns the schedule, the owner of the occurrence report.
+    pub owner_id: Uuid,
 }
 
 /// Durable coordinator for manifest and recap-request sequencing.
@@ -39,34 +113,28 @@ impl DigestCoordinator {
     /// # Errors
     ///
     /// Returns a finite linkage or storage class.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the atomic manifest, outbox, and state transition is intentionally visible"
-    )]
     pub async fn commit_manifest(
         &self,
-        manifest_id: Uuid,
-        owner_id: Uuid,
         manifest: &CanonicalManifest,
-        recap_request: Option<&[u8]>,
+        recap_request: &[u8],
     ) -> Result<IntakeOutcome, CoordinatorError> {
-        let canonical_json: serde_json::Value =
-            serde_json::from_slice(&manifest.bytes).map_err(|_| CoordinatorError::Invalid)?;
+        let (request, operation_id) = checked_recap_request(manifest, recap_request)?;
+        let owner_id = manifest.owner_id;
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|_| CoordinatorError::Storage)?;
         let inserted: Option<(Uuid,)> = sqlx::query_as(
-            "insert into channel_digests.digest_manifests (manifest_id, run_id, owner_id, sha256, source_count, channel_count, canonical_json) values ($1, $2, $3, $4, $5, $6, $7) on conflict (run_id) do nothing returning manifest_id",
+            "insert into channel_digests.digest_manifests (manifest_id, run_id, owner_id, sha256, source_count, channel_count, canonical_text) values ($1, $2, $3, $4, $5, $6, $7) on conflict (run_id) do nothing returning manifest_id",
         )
-        .bind(manifest_id)
+        .bind(manifest.manifest_id)
         .bind(manifest.run_id)
         .bind(owner_id)
         .bind(&manifest.sha256)
         .bind(i32::try_from(manifest.source_count).map_err(|_| CoordinatorError::Invalid)?)
         .bind(i32::try_from(manifest.channel_count).map_err(|_| CoordinatorError::Invalid)?)
-        .bind(canonical_json)
+        .bind(&manifest.text)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| CoordinatorError::Storage)?;
@@ -82,90 +150,130 @@ impl DigestCoordinator {
                 .rollback()
                 .await
                 .map_err(|_| CoordinatorError::Storage)?;
-            return if existing == Some((manifest_id, owner_id, manifest.sha256.clone())) {
+            return if existing == Some((manifest.manifest_id, owner_id, manifest.sha256.clone())) {
                 Ok(IntakeOutcome::Replayed)
             } else {
                 Err(CoordinatorError::Invalid)
             };
         }
-        if manifest.source_count == 0 {
-            if recap_request.is_some() {
-                return Err(CoordinatorError::Invalid);
-            }
-            let changed = sqlx::query(
-                "update channel_digests.digest_runs set state = 'completed', updated_at = now() where run_id = $1 and owner_id = $2 and state in ('accepted', 'acquiring')",
-            )
-            .bind(manifest.run_id)
-            .bind(owner_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| CoordinatorError::Storage)?;
-            if changed.rows_affected() != 1 {
-                return Err(CoordinatorError::Invalid);
-            }
-        } else {
-            let raw = recap_request.ok_or(CoordinatorError::Invalid)?;
-            let request: KnowledgeChannelDigestRecapRequested =
-                serde_json::from_slice(raw).map_err(|_| CoordinatorError::Invalid)?;
-            request
-                .validate_for_publish()
-                .map_err(|_| CoordinatorError::Invalid)?;
-            let value = serde_json::to_value(&request).map_err(|_| CoordinatorError::Invalid)?;
-            let expected_owner = format!("user:{owner_id}");
-            let expected_manifest = format!("channel-digest-manifest:{manifest_id}");
-            if value.get("owner").and_then(serde_json::Value::as_str)
-                != Some(expected_owner.as_str())
-                || value
-                    .get("digest_run_id")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(manifest.run_id.to_string().as_str())
-                || value
-                    .get("manifest_ref")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(expected_manifest.as_str())
-                || value
-                    .pointer("/manifest_digest/hex")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(manifest.sha256.as_str())
-                || value
-                    .get("source_count")
-                    .and_then(serde_json::Value::as_u64)
-                    != u64::try_from(manifest.source_count).ok()
-                || value
-                    .get("channel_count")
-                    .and_then(serde_json::Value::as_u64)
-                    != u64::try_from(manifest.channel_count).ok()
-            {
-                return Err(CoordinatorError::Invalid);
-            }
-            sqlx::query(
-                "insert into channel_digests.outbox_messages (outbox_id, subject, semantic_key, owner_id, operation_id, payload) values ($1, 'knowledge.channel_digest_recap.requested.v1', $2, $3, $4, $5)",
-            )
-            .bind(Uuid::now_v7())
-            .bind(manifest.run_id.to_string())
-            .bind(owner_id)
-            .bind(request.operation_id.0)
-            .bind(value)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| CoordinatorError::Storage)?;
-            let changed = sqlx::query(
-                "update channel_digests.digest_runs set state = 'waiting_recap', updated_at = now() where run_id = $1 and owner_id = $2 and state in ('accepted', 'acquiring')",
-            )
-            .bind(manifest.run_id)
-            .bind(owner_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| CoordinatorError::Storage)?;
-            if changed.rows_affected() != 1 {
-                return Err(CoordinatorError::Invalid);
-            }
+        sqlx::query(
+            "insert into channel_digests.outbox_messages (outbox_id, subject, semantic_key, owner_id, operation_id, payload) values ($1, 'knowledge.channel_digest_recap.requested.v1', $2, $3, $4, $5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(manifest.run_id.to_string())
+        .bind(owner_id)
+        .bind(operation_id)
+        .bind(request)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+        let changed = sqlx::query(
+            "update channel_digests.digest_runs set state = 'waiting_recap', updated_at = now() where run_id = $1 and owner_id = $2 and state in ('accepted', 'acquiring')",
+        )
+        .bind(manifest.run_id)
+        .bind(owner_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+        if changed.rows_affected() != 1 {
+            return Err(CoordinatorError::Invalid);
         }
         transaction
             .commit()
             .await
             .map_err(|_| CoordinatorError::Storage)?;
         Ok(IntakeOutcome::Applied)
+    }
+
+    /// Completes a run whose selection is empty, without a manifest or a recap request.
+    ///
+    /// An owned operation reports `succeeded` with no result in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite linkage or storage class.
+    pub(crate) async fn complete_empty_run(
+        &self,
+        run_id: Uuid,
+        owner_id: Uuid,
+    ) -> Result<(), CoordinatorError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| CoordinatorError::Storage)?;
+        let changed = sqlx::query(
+            "update channel_digests.digest_runs set state = 'completed', updated_at = now() where run_id = $1 and owner_id = $2 and state in ('accepted', 'acquiring')",
+        )
+        .bind(run_id)
+        .bind(owner_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+        if changed.rows_affected() != 1 {
+            return Err(CoordinatorError::Invalid);
+        }
+        let owned = reports::on_demand_operation(&mut transaction, run_id, owner_id).await?;
+        if let Some(operation) = owned {
+            OperationReportRow::new(
+                operation,
+                owner_id,
+                OperationStatus::Succeeded,
+                "no_sources",
+            )?
+            .enqueue(&mut transaction)
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| CoordinatorError::Storage)
+    }
+
+    /// Fails a run terminally and reports the owning operation in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a finite linkage or storage class.
+    pub(crate) async fn fail_run(
+        &self,
+        run_id: Uuid,
+        owner_id: Uuid,
+        failure: RunFailure,
+    ) -> Result<(), CoordinatorError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| CoordinatorError::Storage)?;
+        let changed = sqlx::query(
+            "update channel_digests.digest_runs set state = 'failed', safe_failure_class = $1, updated_at = now() where run_id = $2 and owner_id = $3 and state in ('accepted', 'acquiring')",
+        )
+        .bind(failure.class())
+        .bind(run_id)
+        .bind(owner_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+        if changed.rows_affected() != 1 {
+            return Err(CoordinatorError::Invalid);
+        }
+        let owned = reports::on_demand_operation(&mut transaction, run_id, owner_id).await?;
+        if let Some(operation) = owned {
+            OperationReportRow::new(
+                operation,
+                owner_id,
+                OperationStatus::Failed,
+                failure.stage(),
+            )?
+            .with_error(failure.code(), failure.message(), failure.retryable())?
+            .enqueue(&mut transaction)
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| CoordinatorError::Storage)
     }
 
     /// Settles one typed Knowledge completion against immutable manifest evidence.
@@ -293,6 +401,14 @@ impl DigestCoordinator {
         if changed.rows_affected() != 1 {
             return Err(CoordinatorError::Invalid);
         }
+        reports::report_completion(
+            &mut transaction,
+            (run_id, owner_id),
+            message_id,
+            fact.result_ref.as_str(),
+            fact.coverage.omitted_count,
+        )
+        .await?;
         sqlx::query(
             "update channel_digests.inbox_messages set state = 'completed', completed_at = now() where message_id = $1",
         )
@@ -323,17 +439,7 @@ impl DigestCoordinator {
             .map_err(|_| CoordinatorError::Invalid)?;
         let run_id = fact.digest_run_id.as_uuid();
         let owner_id = fact.owner.user_id().0;
-        let failure_class = match fact.failure_code {
-            ChannelDigestRecapFailureCode::ManifestUnavailable => "manifest_unavailable",
-            ChannelDigestRecapFailureCode::ManifestIntegrity => "manifest_integrity",
-            ChannelDigestRecapFailureCode::UnsupportedLanguage => "unsupported_language",
-            ChannelDigestRecapFailureCode::ContextBudget => "context_budget",
-            ChannelDigestRecapFailureCode::ProviderUnavailable => "provider_unavailable",
-            ChannelDigestRecapFailureCode::ProviderTimeout => "provider_timeout",
-            ChannelDigestRecapFailureCode::InvalidOutput => "invalid_output",
-            ChannelDigestRecapFailureCode::CostBudget => "cost_budget",
-            ChannelDigestRecapFailureCode::Cancelled => "cancelled",
-        };
+        let (failure_class, retryable) = classify_failure(fact.failure_code);
         let durable: Option<(String, Uuid, String)> = sqlx::query_as(
             "select r.state, m.manifest_id, m.sha256
              from channel_digests.digest_runs r
@@ -399,6 +505,13 @@ impl DigestCoordinator {
         if changed.rows_affected() != 1 {
             return Err(CoordinatorError::Invalid);
         }
+        reports::report_recap_failure(
+            &mut transaction,
+            (run_id, owner_id),
+            message_id,
+            (failure_class, retryable),
+        )
+        .await?;
         sqlx::query(
             "update channel_digests.inbox_messages set state = 'completed', completed_at = now() where message_id = $1",
         )
@@ -415,17 +528,25 @@ impl DigestCoordinator {
 
     /// Accepts and fans one authoritative schedule occurrence out to active owners.
     ///
+    /// The occurrence operation reports `succeeded` in the fan-out transaction. The fanned-out
+    /// runs carry its operation id for correlation and report nothing themselves.
+    ///
     /// # Errors
     ///
     /// Returns a safe storage class when fan-out cannot be made durable.
     pub async fn accept_occurrence(
         &self,
-        message_id: Uuid,
-        payload: &[u8],
-        occurrence_key: &str,
-        prior_at: &str,
-        due_at: &str,
+        occurrence: &OccurrenceRequest<'_>,
     ) -> Result<IntakeOutcome, CoordinatorError> {
+        let OccurrenceRequest {
+            message_id,
+            payload,
+            occurrence_key,
+            previous_due_at,
+            due_at,
+            operation_id,
+            owner_id: report_owner,
+        } = *occurrence;
         if !occurrence_key.starts_with("schedule-occurrence:") {
             return Err(CoordinatorError::Invalid);
         }
@@ -451,35 +572,22 @@ impl DigestCoordinator {
                 .map_err(|_| CoordinatorError::Storage)?;
             return Ok(IntakeOutcome::Replayed);
         }
-        let owners: Vec<(Uuid, String)> = sqlx::query_as(
-            "select owner_id, min(first_activated_at)::text from channel_digests.subscriptions where enabled and first_activated_at < $1::timestamptz group by owner_id order by owner_id",
+        fan_out(
+            &mut transaction,
+            occurrence_key,
+            operation_id,
+            (previous_due_at, due_at),
         )
-        .bind(due_at)
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(|_| CoordinatorError::Storage)?;
-        for (owner_id, activation_at) in owners {
-            let window: (String, String) = sqlx::query_as(
-                "select start_at::text, end_at::text from channel_digests.normalized_window(true, $1::timestamptz, $2::timestamptz, $3::timestamptz)",
-            )
-            .bind(&activation_at)
-            .bind(prior_at)
-            .bind(due_at)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| CoordinatorError::Storage)?;
-            sqlx::query(
-                "insert into channel_digests.digest_runs (run_id, owner_id, trigger, idempotency_key, window_start, window_end, state) values ($1, $2, 'scheduled', $3, $4::timestamptz, $5::timestamptz, 'accepted') on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing",
-            )
-            .bind(Uuid::now_v7())
-            .bind(owner_id)
-            .bind(occurrence_key)
-            .bind(&window.0)
-            .bind(&window.1)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| CoordinatorError::Storage)?;
-        }
+        .await?;
+        OperationReportRow::new(
+            operation_id,
+            report_owner,
+            OperationStatus::Succeeded,
+            "fanned_out",
+        )?
+        .caused_by(format!("command:{message_id}"))
+        .enqueue(&mut transaction)
+        .await?;
         sqlx::query(
             "update channel_digests.inbox_messages set state = 'completed', completed_at = now() where message_id = $1",
         )
@@ -492,5 +600,102 @@ impl DigestCoordinator {
             .await
             .map_err(|_| CoordinatorError::Storage)?;
         Ok(IntakeOutcome::Applied)
+    }
+}
+
+/// Creates one scheduled run per owner with an active subscription before the due instant.
+async fn fan_out(
+    connection: &mut PgConnection,
+    occurrence_key: &str,
+    operation_id: Uuid,
+    (previous_due_at, due_at): (&str, &str),
+) -> Result<(), CoordinatorError> {
+    let owners: Vec<(Uuid, String)> = sqlx::query_as(
+        "select owner_id, min(first_activated_at)::text from channel_digests.subscriptions where enabled and first_activated_at < $1::timestamptz group by owner_id order by owner_id",
+    )
+    .bind(due_at)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| CoordinatorError::Storage)?;
+    for (owner_id, activation_at) in owners {
+        let window: (String, String) = sqlx::query_as(
+            "select start_at::text, end_at::text from channel_digests.normalized_window(true, $1::timestamptz, $2::timestamptz, $3::timestamptz)",
+        )
+        .bind(&activation_at)
+        .bind(previous_due_at)
+        .bind(due_at)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+        sqlx::query(
+            "insert into channel_digests.digest_runs (run_id, owner_id, operation_id, trigger, idempotency_key, window_start, window_end, state) values ($1, $2, $3, 'scheduled', $4, $5::timestamptz, $6::timestamptz, 'accepted') on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner_id)
+        .bind(operation_id)
+        .bind(occurrence_key)
+        .bind(&window.0)
+        .bind(&window.1)
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
+    }
+    Ok(())
+}
+
+/// Maps a Knowledge failure code to its stored class and whether a retry may succeed.
+fn classify_failure(code: ChannelDigestRecapFailureCode) -> (&'static str, bool) {
+    match code {
+        ChannelDigestRecapFailureCode::ManifestUnavailable => ("manifest_unavailable", true),
+        ChannelDigestRecapFailureCode::ManifestIntegrity => ("manifest_integrity", false),
+        ChannelDigestRecapFailureCode::UnsupportedLanguage => ("unsupported_language", false),
+        ChannelDigestRecapFailureCode::ContextBudget => ("context_budget", false),
+        ChannelDigestRecapFailureCode::ProviderUnavailable => ("provider_unavailable", true),
+        ChannelDigestRecapFailureCode::ProviderTimeout => ("provider_timeout", true),
+        ChannelDigestRecapFailureCode::InvalidOutput => ("invalid_output", false),
+        ChannelDigestRecapFailureCode::CostBudget => ("cost_budget", false),
+        ChannelDigestRecapFailureCode::Cancelled => ("cancelled", false),
+    }
+}
+
+/// Parses the recap request and checks it against the manifest it announces.
+fn checked_recap_request(
+    manifest: &CanonicalManifest,
+    raw: &[u8],
+) -> Result<(serde_json::Value, Uuid), CoordinatorError> {
+    let request: KnowledgeChannelDigestRecapRequested =
+        serde_json::from_slice(raw).map_err(|_| CoordinatorError::Invalid)?;
+    request
+        .validate_for_publish()
+        .map_err(|_| CoordinatorError::Invalid)?;
+    let value = serde_json::to_value(&request).map_err(|_| CoordinatorError::Invalid)?;
+    let expected_owner = format!("user:{}", manifest.owner_id);
+    let expected_manifest = format!("channel-digest-manifest:{}", manifest.manifest_id);
+    let consistent = value.get("owner").and_then(serde_json::Value::as_str)
+        == Some(expected_owner.as_str())
+        && value
+            .get("digest_run_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(manifest.run_id.to_string().as_str())
+        && value
+            .get("manifest_ref")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected_manifest.as_str())
+        && value
+            .pointer("/manifest_digest/hex")
+            .and_then(serde_json::Value::as_str)
+            == Some(manifest.sha256.as_str())
+        && value
+            .get("source_count")
+            .and_then(serde_json::Value::as_u64)
+            == u64::try_from(manifest.source_count).ok()
+        && value
+            .get("channel_count")
+            .and_then(serde_json::Value::as_u64)
+            == u64::try_from(manifest.channel_count).ok();
+    if consistent {
+        Ok((value, request.operation_id.0))
+    } else {
+        Err(CoordinatorError::Invalid)
     }
 }

@@ -170,3 +170,175 @@ fn knowledge_result_reader_is_api_only_redacted_and_bounded()
 
     Ok(())
 }
+
+fn worker_entries() -> Vec<(&'static str, &'static str)> {
+    let mut entries = base();
+    entries.extend([
+        ("RATATOSKR__PROVIDER__API_ID", "12345"),
+        ("RATATOSKR__PROVIDER__API_HASH", "worker-hash-LEAKME"),
+        (
+            "RATATOSKR__PROVIDER__SESSION_FILE",
+            "/run/credentials/session.enc",
+        ),
+        (
+            "RATATOSKR__PROVIDER__SESSION_KEY_FILE",
+            "/run/credentials/session.key",
+        ),
+        ("RATATOSKR__BUS__ENDPOINT", "nats://127.0.0.1:4222"),
+    ]);
+    entries
+}
+
+const NKEY_SEED_PATH: &str = "RATATOSKR__BUS__NKEY_SEED_PATH";
+
+#[test]
+fn worker_role_accepts_an_absolute_bus_nkey_seed_path() -> Result<(), Box<dyn std::error::Error>> {
+    let without = Config::from_environment(Role::Worker, worker_entries())?;
+    assert_eq!(
+        without
+            .bus
+            .as_ref()
+            .ok_or("worker bus is absent")?
+            .nkey_seed_path,
+        None,
+        "an unauthenticated development broker needs no seed"
+    );
+
+    let worker = Config::from_environment(
+        Role::Worker,
+        worker_entries()
+            .into_iter()
+            .chain([(NKEY_SEED_PATH, "/etc/ratatoskr/channel-digests.nkey")]),
+    )?;
+    assert_eq!(
+        worker
+            .bus
+            .as_ref()
+            .ok_or("worker bus is absent")?
+            .nkey_seed_path,
+        Some(std::path::PathBuf::from(
+            "/etc/ratatoskr/channel-digests.nkey"
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_role_rejects_a_relative_nkey_seed_path() {
+    let error = Config::from_environment(
+        Role::Worker,
+        worker_entries()
+            .into_iter()
+            .chain([(NKEY_SEED_PATH, "channel-digests-LEAKME.nkey")]),
+    )
+    .expect_err("a relative seed path must fail");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains(NKEY_SEED_PATH));
+    assert!(
+        diagnostic.contains("must be an absolute path"),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("LEAKME"));
+}
+
+#[test]
+fn api_role_rejects_the_bus_nkey_seed_path() -> Result<(), Box<dyn std::error::Error>> {
+    // The same key is valid for the worker, so the refusal below is role scoping and not a typo.
+    Config::from_environment(
+        Role::Worker,
+        worker_entries()
+            .into_iter()
+            .chain([(NKEY_SEED_PATH, "/etc/ratatoskr/channel-digests.nkey")]),
+    )?;
+    let error = Config::from_environment(
+        Role::Api,
+        base()
+            .into_iter()
+            .chain(reader_entries())
+            .chain([(NKEY_SEED_PATH, "/etc/ratatoskr/channel-digests.nkey")]),
+    )
+    .expect_err("the API role holds no bus credential");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains(NKEY_SEED_PATH));
+    assert!(
+        diagnostic.contains("is not recognized for this role"),
+        "{diagnostic}"
+    );
+    Ok(())
+}
+
+#[test]
+fn schedule_keys_are_worker_only_strict_and_default_when_an_owner_is_set()
+-> Result<(), Box<dyn std::error::Error>> {
+    const OWNER: &str = "RATATOSKR__SCHEDULE__OWNER_USER_ID";
+    const CRON: &str = "RATATOSKR__SCHEDULE__CRON";
+    const ENABLED: &str = "RATATOSKR__SCHEDULE__ENABLED";
+    let owner = "018f0000-0000-7000-8000-000000000042";
+
+    let absent = Config::from_environment(Role::Worker, worker_entries())?;
+    assert_eq!(absent.schedule, None, "no owner registers nothing");
+
+    let defaults = Config::from_environment(
+        Role::Worker,
+        worker_entries().into_iter().chain([(OWNER, owner)]),
+    )?;
+    let schedule = defaults
+        .schedule
+        .ok_or("an owner configures the schedule")?;
+    assert_eq!(schedule.owner_user_id.to_string(), owner);
+    assert_eq!(schedule.cron_expression, "0 6 * * *");
+    assert!(schedule.enabled);
+
+    let explicit = Config::from_environment(
+        Role::Worker,
+        worker_entries().into_iter().chain([
+            (OWNER, owner),
+            (CRON, "30 4 * * *"),
+            (ENABLED, "false"),
+        ]),
+    )?;
+    let schedule = explicit
+        .schedule
+        .ok_or("an owner configures the schedule")?;
+    assert_eq!(schedule.cron_expression, "30 4 * * *");
+    assert!(!schedule.enabled);
+
+    for (key, value) in [
+        (OWNER, "not-a-uuid"),
+        (OWNER, "018F0000-0000-7000-8000-000000000042"),
+        (CRON, "0 6 * *"),
+        (ENABLED, "yes"),
+    ] {
+        let entries = worker_entries()
+            .into_iter()
+            .filter(|(existing, _)| *existing != key)
+            .chain([(OWNER, owner), (key, value)]);
+        let error = Config::from_environment(Role::Worker, entries)
+            .expect_err("an invalid schedule value must fail");
+        assert!(error.to_string().contains(key));
+    }
+
+    for (key, value) in [(CRON, "0 6 * * *"), (ENABLED, "true")] {
+        let error = Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain([(key, value)]),
+        )
+        .expect_err("a schedule detail without an owner must fail");
+        assert!(error.to_string().contains(OWNER), "{error}");
+    }
+
+    let error = Config::from_environment(
+        Role::Api,
+        base()
+            .into_iter()
+            .chain(reader_entries())
+            .chain([(OWNER, owner)]),
+    )
+    .expect_err("the API role registers no schedule");
+    assert!(
+        error
+            .to_string()
+            .contains("is not recognized for this role")
+    );
+    Ok(())
+}

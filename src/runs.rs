@@ -89,16 +89,18 @@ impl RunRepository {
     pub async fn create(
         &self,
         owner_id: Uuid,
+        operation_id: Uuid,
         trigger: RunTrigger,
         idempotency_key: &str,
         start: &str,
         end: &str,
     ) -> Result<Uuid, RunError> {
         let row: (Uuid,) = sqlx::query_as(
-            "select channel_digests.create_digest_run($1, $2, $3, $4, $5::timestamptz, $6::timestamptz)",
+            "select channel_digests.create_digest_run($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)",
         )
         .bind(Uuid::now_v7())
         .bind(owner_id)
+        .bind(operation_id)
         .bind(trigger.as_str())
         .bind(idempotency_key)
         .bind(start)

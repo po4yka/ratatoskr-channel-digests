@@ -162,23 +162,21 @@ async fn worker_consumes_only_preprovisioned_topology_while_provider_is_unready(
         )
         .await?
         .await?;
-    let report = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let message = reports
-                .next()
-                .await
-                .ok_or("operation report stream ended")?;
-            let value: serde_json::Value =
-                serde_json::from_slice(&message.payload).map_err(|_| "invalid report envelope")?;
-            if value.pointer("/payload/operation_id") == Some(&serde_json::json!(operation_id)) {
-                return Ok::<serde_json::Value, &'static str>(value);
-            }
-        }
-    })
-    .await??;
+    let (report, published) = await_report(&mut reports, operation_id).await?;
+    let envelope = ratatoskr_event_envelope::EventEnvelope::from_json(&published)?;
+    let typed = envelope.payload_as::<ratatoskr_operation_contracts::OperationReported>()?;
+    assert_eq!(
+        typed.status,
+        ratatoskr_operation_contracts::OperationStatus::Succeeded
+    );
+    assert_eq!(envelope.producer.as_str(), "ratatoskr-channel-digests");
+    assert_eq!(
+        envelope.correlation_id.to_wire(),
+        format!("operation:{operation_id}")
+    );
     assert_eq!(
         report.pointer("/payload/status"),
-        Some(&serde_json::json!("completed"))
+        Some(&serde_json::json!("succeeded"))
     );
     assert_eq!(
         report.get("tenant_id"),
@@ -187,6 +185,28 @@ async fn worker_consumes_only_preprovisioned_topology_while_provider_is_unready(
     stop(&mut child)?;
     let _ignored = std::fs::remove_dir_all(fixture);
     Ok(())
+}
+
+/// Waits for the report of one operation on the bare `evt.platform.operation.reported.v1` subject.
+async fn await_report(
+    reports: &mut async_nats::Subscriber,
+    operation_id: uuid::Uuid,
+) -> Result<(serde_json::Value, Vec<u8>), Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = reports
+                .next()
+                .await
+                .ok_or("operation report stream ended")?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&message.payload).map_err(|_| "invalid report envelope")?;
+            if value.pointer("/payload/operation_id") == Some(&serde_json::json!(operation_id)) {
+                return Ok::<_, &'static str>((value, message.payload.to_vec()));
+            }
+        }
+    })
+    .await?
+    .map_err(Into::into)
 }
 
 async fn provision_topology(nats_url: &str) -> Result<(), Box<dyn std::error::Error>> {

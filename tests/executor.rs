@@ -4,8 +4,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use ratatoskr_channel_digests::{
-    CommandIntake, Database, ProviderError, ProviderPage, ProviderPost, PublicChannelProvider,
-    PublicChannelUsername, RunExecutor, SubscriptionRepository,
+    CommandIntake, Database, DigestCoordinator, OccurrenceRequest, ProviderError, ProviderPage,
+    ProviderPost, PublicChannelProvider, PublicChannelUsername, RunExecutor,
+    SubscriptionRepository,
 };
 use uuid::Uuid;
 
@@ -144,6 +145,78 @@ async fn deferred_run_does_not_block_the_next_owner() -> Result<(), Box<dyn std:
     .fetch_one(database.pool())
     .await?;
     assert_eq!(states, ("acquiring".into(), "waiting_recap".into()));
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn scheduled_run_from_an_occurrence_executes_and_commits_a_manifest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    reset_state(database.pool()).await?;
+    let owner = Uuid::now_v7();
+    SubscriptionRepository::new(database.pool().clone())
+        .set(owner, "scheduled_executor", true, "2026-08-19T10:00:00Z")
+        .await?;
+    let occurrence_operation = Uuid::now_v7();
+    let occurrence = format!("schedule-occurrence:{}", Uuid::now_v7());
+    let payload = serde_json::to_vec(&serde_json::json!({"occurrence_ref": occurrence}))?;
+    DigestCoordinator::new(database.pool().clone())
+        .accept_occurrence(&OccurrenceRequest {
+            message_id: Uuid::now_v7(),
+            payload: &payload,
+            occurrence_key: &occurrence,
+            previous_due_at: "2026-08-20T10:00:00Z",
+            due_at: "2026-08-21T10:00:00Z",
+            operation_id: occurrence_operation,
+            owner_id: Uuid::now_v7(),
+        })
+        .await?;
+    let executor = RunExecutor::new(
+        database.pool().clone(),
+        FakeProvider(Mutex::new(Some(ProviderPage {
+            posts: vec![ProviderPost {
+                message_id: 31,
+                body: "scheduled synthetic post".to_owned(),
+                published_at: "2026-08-21T09:00:00Z".to_owned(),
+                deleted: false,
+            }],
+            next_before_message_id: None,
+        }))),
+    );
+
+    assert!(
+        executor.execute_one().await?,
+        "a scheduled run must be selected and executed"
+    );
+    let durable: (Uuid, String, i64, Option<Uuid>) = sqlx::query_as(
+        "select r.run_id, r.state,
+                (select count(*) from channel_digests.digest_manifests where run_id = r.run_id),
+                (select operation_id from channel_digests.outbox_messages
+                  where subject = 'knowledge.channel_digest_recap.requested.v1'
+                    and semantic_key = r.run_id::text)
+         from channel_digests.digest_runs r where r.owner_id = $1 and r.trigger = 'scheduled'",
+    )
+    .bind(owner)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        (durable.1.as_str(), durable.2, durable.3),
+        ("waiting_recap", 1, Some(occurrence_operation))
+    );
+    let request: (serde_json::Value,) = sqlx::query_as(
+        "select payload from channel_digests.outbox_messages
+         where subject = 'knowledge.channel_digest_recap.requested.v1' and semantic_key = $1",
+    )
+    .bind(durable.0.to_string())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        request.0.get("operation_id"),
+        Some(&serde_json::json!(occurrence_operation))
+    );
     database.close().await;
     Ok(())
 }
