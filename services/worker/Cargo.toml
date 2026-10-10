@@ -14,6 +14,10 @@ tokio.workspace = true
 async-nats.workspace = true
 chacha20poly1305.workspace = true
 futures-util.workspace = true
+nkeys = "0.4.5"
+ratatoskr-event-envelope.workspace = true
+ratatoskr-identifiers.workspace = true
+ratatoskr-operation-contracts.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 
