@@ -22,6 +22,17 @@ It then enforces the 850-line Rust source ceiling and a content/credential-to-ou
 Start disposable PostgreSQL 17 and NATS JetStream fixtures before the gate. No test needs a Telegram
 credential, network session, private channel, real user/chat identifier, or source body.
 
+## Authorized-broker test
+
+`services/worker/tests/authorized_bus.rs` renders `deploy/nats/identity.conf` into the `authorization`
+block of a real `nats-server`, provisions the streams and the five durables as an admin identity, and
+proves the worker's connect helper, consumer verification and outbox publish path as the
+channel-digests identity, including the refusals. It starts the `nats-server` binary when one is on
+`PATH` (or named by `CHANNEL_DIGEST_TEST_NATS_SERVER`) and the pinned CI image through `docker`
+otherwise. The seed it generates is written to a private temporary file; the deployed seed path is
+`/etc/ratatoskr/channel-digests.nkey`. When Platform's ACL changes, copy this service's stanza into
+`deploy/nats/identity.conf`; the workspace test fails when the two differ.
+
 ## Check configuration
 
 Both binaries accept `check-config`. It parses strict role-specific settings and, for the worker,
