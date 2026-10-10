@@ -40,6 +40,37 @@ curl --silent --output /dev/null --write-out '%{http_code}\n' --max-time 2 \
 Do not use a real analysis UUID for this probe and do not pass the secret with shell tracing enabled.
 Remove the old Knowledge credential only after an authorized Channel Digests result read succeeds.
 
+## Bus credential
+
+The broker authenticates this service by nkey. Generate the CHANNEL_DIGESTS seed as
+`ratatoskr-platform/deploy/nats/README.md` describes, install it as the file
+`/etc/ratatoskr/channel-digests.nkey` owned by the worker user with mode `0600`, and point the
+worker at it with `RATATOSKR__BUS__NKEY_SEED_PATH` (absolute path, worker role only; the API role
+rejects the key). The seed is read when the worker connects and is never logged. Leave the key unset
+only for an unauthenticated local development broker.
+
+Start order on a fresh broker: reload NATS with the ACL, start Edge so it provisions the fixed
+durables, then start the worker; the worker verifies each durable and stays unready until all five
+match.
+
+## Daily schedule registration
+
+At start the worker queues one `platform.schedule.registration_requested.v1` command for its
+`daily-digest` schedule. The settings are worker-only and strict:
+
+- `RATATOSKR__SCHEDULE__OWNER_USER_ID` - canonical lowercase UUID of the Platform user that owns the
+  schedule. Without it nothing is registered and the worker logs the safe class
+  `schedule_owner_absent`. This user MUST exist in `identity.users`: Platform has no system
+  principal, so a registration for an unknown user is rejected;
+- `RATATOSKR__SCHEDULE__CRON` - five-field UTC cron expression, default `0 6 * * *`;
+- `RATATOSKR__SCHEDULE__ENABLED` - `true` or `false`, default `true` once an owner is set.
+
+Setting the cron or enabled key without an owner is a configuration error. The outbox semantic key
+is the SHA-256 of owner, cron and enabled, so an unchanged configuration is queued once, a changed one
+registers again, and returning to an earlier configuration registers it again. Platform upserts on
+`(service_name, name)` and the producer must be an allowlisted registrar
+(`ALLOWED_REGISTRARS` includes `ratatoskr-channel-digests`).
+
 ## Session provisioning and reauthorization
 
 Perform interactive first authorization only in a temporary owner-controlled environment using the
@@ -87,7 +118,9 @@ Disable the Platform-owned schedule first if repeated occurrences would amplify 
 
 ## Health and shutdown
 
-The API operator listener is `127.0.0.1:9469`; worker is `127.0.0.1:9470`. `/live` reports process
+The API domain listener answers `GET /ready` behind the service bearer alone (`200` when the database
+answers, `503` otherwise); this is the probe Platform and Knowledge use. The API operator listener is
+`127.0.0.1:9469`; worker is `127.0.0.1:9470`. `/live` reports process
 liveness and `/ready` reports dependency readiness; both send `Cache-Control: no-store`. `SIGTERM`
 immediately removes readiness and drains listeners within the configured bound.
 
