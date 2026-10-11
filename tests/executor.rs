@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{
     CommandIntake, Database, DigestCoordinator, OccurrenceRequest, ProviderError, ProviderPage,
     ProviderPost, PublicChannelProvider, PublicChannelUsername, RunExecutor,
@@ -172,6 +173,7 @@ async fn scheduled_run_from_an_occurrence_executes_and_commits_a_manifest()
             due_at: "2026-08-21T10:00:00Z",
             operation_id: occurrence_operation,
             owner_id: Uuid::now_v7(),
+            output_language: OutputLanguage::Ru,
         })
         .await?;
     let executor = RunExecutor::new(

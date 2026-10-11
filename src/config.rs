@@ -4,12 +4,16 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_identifiers::UserId;
 use ratatoskr_operation_contracts::ScheduleCronExpression;
 use uuid::Uuid;
 
 /// Default daily digest schedule, 06:00 UTC.
 const DEFAULT_SCHEDULE_CRON: &str = "0 6 * * *";
+
+/// Language of scheduled digests when `RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE` is not set.
+pub(crate) const DEFAULT_SCHEDULE_LANGUAGE: OutputLanguage = OutputLanguage::Ru;
 
 /// Executable role selected before configuration is decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,8 @@ pub struct ScheduleConfig {
     pub cron_expression: String,
     /// Whether the schedule fires.
     pub enabled: bool,
+    /// Language of the recap of every run an occurrence of the schedule creates.
+    pub output_language: OutputLanguage,
 }
 
 /// API-only authority and finite policy for reading completed recaps from Knowledge.
@@ -243,6 +249,7 @@ struct Builder {
     schedule_owner: Option<Uuid>,
     schedule_cron: Option<String>,
     schedule_enabled: Option<bool>,
+    schedule_language: Option<OutputLanguage>,
     knowledge_base_url: Option<String>,
     knowledge_result_reader_service_secret: Option<Secret>,
     knowledge_connect_timeout_ms: Option<u64>,
@@ -268,6 +275,7 @@ impl Builder {
             schedule_owner: None,
             schedule_cron: None,
             schedule_enabled: None,
+            schedule_language: None,
             knowledge_base_url: None,
             knowledge_result_reader_service_secret: None,
             knowledge_connect_timeout_ms: None,
@@ -333,6 +341,9 @@ impl Builder {
             }
             "RATATOSKR__SCHEDULE__ENABLED" if self.role == Role::Worker => {
                 self.schedule_enabled = Some(parse_bool(key, value)?);
+            }
+            "RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE" if self.role == Role::Worker => {
+                self.schedule_language = Some(parse_language(key, value)?);
             }
             "RATATOSKR__KNOWLEDGE__BASE_URL" if self.role == Role::Api => {
                 self.knowledge_base_url = Some(loopback_http_base_url(key, value)?);
@@ -469,7 +480,10 @@ impl Builder {
     /// The schedule to register, absent without an owner and an error when only a part is set.
     fn schedule(&self) -> Result<Option<ScheduleConfig>, ConfigError> {
         let Some(owner_user_id) = self.schedule_owner else {
-            if self.schedule_cron.is_some() || self.schedule_enabled.is_some() {
+            if self.schedule_cron.is_some()
+                || self.schedule_enabled.is_some()
+                || self.schedule_language.is_some()
+            {
                 return Err(ConfigError::new(
                     "RATATOSKR__SCHEDULE__OWNER_USER_ID",
                     "is required",
@@ -484,7 +498,16 @@ impl Builder {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SCHEDULE_CRON.to_owned()),
             enabled: self.schedule_enabled.unwrap_or(true),
+            output_language: self.schedule_language.unwrap_or(DEFAULT_SCHEDULE_LANGUAGE),
         }))
+    }
+}
+
+fn parse_language(key: &str, value: &str) -> Result<OutputLanguage, ConfigError> {
+    match value {
+        "ru" => Ok(OutputLanguage::Ru),
+        "en" => Ok(OutputLanguage::En),
+        _ => Err(ConfigError::new(key, "must be ru or en")),
     }
 }
 

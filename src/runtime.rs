@@ -154,12 +154,20 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
         operator_router(lifecycle.clone()),
         drain_rx.clone(),
     ));
-    let worker_pool = database.pool().clone();
+    let handler = crate::WorkerMessageHandler::new(
+        database.pool().clone(),
+        config
+            .schedule
+            .as_ref()
+            .map_or(crate::config::DEFAULT_SCHEDULE_LANGUAGE, |schedule| {
+                schedule.output_language
+            }),
+    );
     let bus_readiness = readiness.clone();
     let worker = tokio::spawn(async move {
         Box::pin(crate::bus::supervise_bus(
             bus,
-            worker_pool,
+            handler,
             bus_readiness,
             drain_rx,
         ))

@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{
     CommandIntake, Database, DigestCoordinator, IntakeOutcome, ObservedRevision, OccurrenceRequest,
     ProviderError, ProviderPage, ProviderPost, PublicChannelProvider, PublicChannelUsername,
@@ -383,6 +384,7 @@ async fn occurrence_reports_succeeded_on_its_own_operation_and_scheduled_runs_re
                 due_at: WINDOW_END,
                 operation_id: occurrence_operation,
                 owner_id: schedule_owner,
+                output_language: OutputLanguage::Ru,
             })
             .await?,
         IntakeOutcome::Applied

@@ -1,5 +1,6 @@
 //! Strict finite configuration and role-separation behavior.
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{Config, Role};
 
 fn base() -> Vec<(&'static str, &'static str)> {
@@ -372,5 +373,61 @@ fn run_deadline_is_finite() -> Result<(), Box<dyn std::error::Error>> {
         );
         assert!(!diagnostic.contains("LEAKME"));
     }
+    Ok(())
+}
+
+#[test]
+fn schedule_output_language_is_strict_and_worker_only() -> Result<(), Box<dyn std::error::Error>> {
+    const OWNER: &str = "RATATOSKR__SCHEDULE__OWNER_USER_ID";
+    const LANGUAGE: &str = "RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE";
+    let owner = "018f0000-0000-7000-8000-000000000042";
+    let with_owner = || worker_entries().into_iter().chain([(OWNER, owner)]);
+
+    let default = Config::from_environment(Role::Worker, with_owner())?;
+    assert_eq!(
+        default
+            .schedule
+            .ok_or("owner configures the schedule")?
+            .output_language,
+        OutputLanguage::Ru,
+        "the default stays Russian"
+    );
+    for (value, expected) in [("ru", OutputLanguage::Ru), ("en", OutputLanguage::En)] {
+        let worker =
+            Config::from_environment(Role::Worker, with_owner().chain([(LANGUAGE, value)]))?;
+        assert_eq!(
+            worker
+                .schedule
+                .ok_or("owner configures the schedule")?
+                .output_language,
+            expected,
+            "{value}"
+        );
+    }
+
+    for value in ["de", "RU", "En", "", "ru-LEAKME"] {
+        let error = Config::from_environment(Role::Worker, with_owner().chain([(LANGUAGE, value)]))
+            .expect_err("only ru and en are languages");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(LANGUAGE), "{diagnostic}");
+        assert!(!diagnostic.contains("LEAKME"));
+    }
+
+    let without_owner = Config::from_environment(
+        Role::Worker,
+        worker_entries().into_iter().chain([(LANGUAGE, "en")]),
+    )
+    .expect_err("a schedule detail without an owner must fail");
+    assert!(without_owner.to_string().contains(OWNER), "{without_owner}");
+
+    let api = Config::from_environment(
+        Role::Api,
+        base()
+            .into_iter()
+            .chain(reader_entries())
+            .chain([(LANGUAGE, "en")]),
+    )
+    .expect_err("the API role registers no schedule");
+    assert!(api.to_string().contains("is not recognized for this role"));
     Ok(())
 }

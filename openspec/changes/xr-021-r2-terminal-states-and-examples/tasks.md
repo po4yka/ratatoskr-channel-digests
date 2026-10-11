@@ -15,8 +15,8 @@
 
 ## 4. Scheduled output language (R2-05 f)
 
-- [ ] 4.1 RED: add `tests/config.rs::schedule_output_language_is_strict_and_worker_only` and `tests/schedule.rs::fan_out_uses_the_configured_language`; run them and confirm they fail on the unrecognized key and the default language.
-- [ ] 4.2 GREEN: add `ScheduleConfig.output_language` and pass it through the worker handler into `accept_occurrence`.
+- [x] 4.1 RED: add `tests/config.rs::schedule_output_language_is_strict_and_worker_only` and `tests/schedule.rs::fan_out_uses_the_configured_language`; run them and confirm they fail on the unrecognized key and the default language.
+- [x] 4.2 GREEN: add `ScheduleConfig.output_language` and pass it through the worker handler into `accept_occurrence`.
 
 ## 5. Operator examples and documentation (R2-10, R2-01)
 

@@ -9,7 +9,7 @@ use futures_util::StreamExt as _;
 use ratatoskr_channel_digest_contracts::{
     ChannelDigestRunRequested, ChannelDigestScheduleOccurrenceRequested,
     ChannelDigestSubscriptionSetRequested, KnowledgeChannelDigestRecapCompleted,
-    KnowledgeChannelDigestRecapFailed,
+    KnowledgeChannelDigestRecapFailed, OutputLanguage,
 };
 use ratatoskr_event_envelope::{
     CommandEnvelope, CommandPayload as _, EventEnvelope, EventPayload as _,
@@ -73,13 +73,19 @@ pub enum DeliveryDisposition {
 #[derive(Debug, Clone)]
 pub struct WorkerMessageHandler {
     pool: sqlx::PgPool,
+    schedule_language: OutputLanguage,
 }
 
 impl WorkerMessageHandler {
     /// Creates a handler over one finite pool.
+    ///
+    /// `schedule_language` is the recap language of every run a schedule occurrence creates.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: sqlx::PgPool, schedule_language: OutputLanguage) -> Self {
+        Self {
+            pool,
+            schedule_language,
+        }
     }
 
     /// Validates and applies one exact transport subject and envelope.
@@ -130,6 +136,7 @@ impl WorkerMessageHandler {
                     due_at: &command.due_at.to_string(),
                     operation_id,
                     owner_id,
+                    output_language: self.schedule_language,
                 })
                 .await
             {
@@ -147,15 +154,15 @@ impl WorkerMessageHandler {
                 }
                 let Ok(command) = envelope.payload_as::<ChannelDigestSubscriptionSetRequested>()
                 else {
-                    return DeliveryDisposition::Term;
+                    return self
+                        .reject_unreadable(&envelope, CommandKind::Subscription)
+                        .await;
                 };
                 if envelope.tenant_id.as_ref() != Some(&command.owner) {
                     return DeliveryDisposition::Term;
                 }
                 let Ok(payload) = serde_json::to_vec(&command) else {
-                    return self
-                        .reject_unreadable(&envelope, CommandKind::Subscription)
-                        .await;
+                    return DeliveryDisposition::Term;
                 };
                 CommandIntake::new(self.pool.clone())
                     .accept_subscription(envelope.command_id.0, &payload)
@@ -166,13 +173,13 @@ impl WorkerMessageHandler {
                     return DeliveryDisposition::Term;
                 }
                 let Ok(command) = envelope.payload_as::<ChannelDigestRunRequested>() else {
-                    return DeliveryDisposition::Term;
+                    return self.reject_unreadable(&envelope, CommandKind::Run).await;
                 };
                 if envelope.tenant_id.as_ref() != Some(&command.owner) {
                     return DeliveryDisposition::Term;
                 }
                 let Ok(payload) = serde_json::to_vec(&command) else {
-                    return self.reject_unreadable(&envelope, CommandKind::Run).await;
+                    return DeliveryDisposition::Term;
                 };
                 CommandIntake::new(self.pool.clone())
                     .accept_run(envelope.command_id.0, &payload)
@@ -187,13 +194,6 @@ impl WorkerMessageHandler {
         }
     }
 
-    async fn handle_event(&self, subject: &str, bytes: &[u8]) -> DeliveryDisposition {
-        let Ok(envelope) = EventEnvelope::from_json(bytes) else {
-            return DeliveryDisposition::Term;
-        };
-        if envelope.producer.as_str() != KNOWLEDGE_PRODUCER {
-            return DeliveryDisposition::Term;
-        }
     /// Reports a command whose payload does not decode but names its operation and owner.
     ///
     /// Only a payload whose owner equals the envelope tenant is attributable; anything else stays
@@ -216,6 +216,13 @@ impl WorkerMessageHandler {
         }
     }
 
+    async fn handle_event(&self, subject: &str, bytes: &[u8]) -> DeliveryDisposition {
+        let Ok(envelope) = EventEnvelope::from_json(bytes) else {
+            return DeliveryDisposition::Term;
+        };
+        if envelope.producer.as_str() != KNOWLEDGE_PRODUCER {
+            return DeliveryDisposition::Term;
+        }
         let coordinator = DigestCoordinator::new(self.pool.clone());
         let result = match subject {
             COMPLETED_SUBJECT => {
@@ -399,12 +406,12 @@ async fn exact_consumer(
 
 pub(crate) async fn supervise_bus(
     bus: BusConfig,
-    pool: sqlx::PgPool,
+    handler: WorkerMessageHandler,
     readiness: WorkerReadiness,
     mut drain: watch::Receiver<bool>,
 ) {
     while !*drain.borrow() {
-        let result = Box::pin(consume_once(&bus, &pool, &readiness, &mut drain)).await;
+        let result = Box::pin(consume_once(&bus, &handler, &readiness, &mut drain)).await;
         readiness.set_bus(false);
         if *drain.borrow() {
             return;
@@ -427,7 +434,7 @@ pub(crate) async fn supervise_bus(
 
 async fn consume_once(
     bus: &BusConfig,
-    pool: &sqlx::PgPool,
+    handler: &WorkerMessageHandler,
     readiness: &WorkerReadiness,
     drain: &mut watch::Receiver<bool>,
 ) -> Result<(), BusError> {
@@ -439,7 +446,7 @@ async fn consume_once(
     let mut schedule_messages = batches(&consumers.schedules).await?;
     let mut completion_messages = batches(&consumers.completed).await?;
     let mut failure_messages = batches(&consumers.failed).await?;
-    let handler = WorkerMessageHandler::new(pool.clone());
+    let pool = &handler.pool;
     publish_outbox(pool, &context).await?;
     readiness.set_bus(true);
     let mut outbox_tick = tokio::time::interval(Duration::from_secs(1));
@@ -451,19 +458,19 @@ async fn consume_once(
             _ = drain.changed() => return Ok(()),
             _ = outbox_tick.tick() => publish_outbox(pool, &context).await?,
             next = subscription_messages.next() => {
-                process_delivery(next, &handler, &context, pool).await?;
+                process_delivery(next, handler, &context, pool).await?;
             }
             next = run_messages.next() => {
-                process_delivery(next, &handler, &context, pool).await?;
+                process_delivery(next, handler, &context, pool).await?;
             }
             next = schedule_messages.next() => {
-                process_delivery(next, &handler, &context, pool).await?;
+                process_delivery(next, handler, &context, pool).await?;
             }
             next = completion_messages.next() => {
-                process_delivery(next, &handler, &context, pool).await?;
+                process_delivery(next, handler, &context, pool).await?;
             }
             next = failure_messages.next() => {
-                process_delivery(next, &handler, &context, pool).await?;
+                process_delivery(next, handler, &context, pool).await?;
             }
         }
     }

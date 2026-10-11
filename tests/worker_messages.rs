@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{
     Database, DeliveryDisposition, SubscriptionRepository, WorkerMessageHandler,
 };
@@ -12,7 +13,7 @@ async fn exact_envelopes_drive_one_durable_effect() -> Result<(), Box<dyn std::e
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
     let owner = Uuid::now_v7();
     let command_id = Uuid::now_v7();
     let operation_id = Uuid::now_v7();
@@ -86,7 +87,7 @@ async fn run_envelope_preserves_selected_identity_and_replays()
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
     let owner = Uuid::now_v7();
     let command_id = Uuid::now_v7();
     let operation_id = Uuid::now_v7();
@@ -172,7 +173,7 @@ async fn schedule_occurrence_envelope_fans_out_once_to_active_owners()
             "due_at": "2026-08-21T10:00:00Z"
         }
     }))?;
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
 
     for _ in 0..2 {
         assert_eq!(
@@ -233,7 +234,7 @@ async fn schedule_occurrence_accepts_a_platform_contract_envelope_and_terminates
             "due_at": "2026-08-21T10:00:00Z"
         }
     });
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
     let subject = "cmd.channel_digest.schedule.occurrence_requested.v1";
 
     for _ in 0..2 {
@@ -369,7 +370,7 @@ async fn a_run_command_that_fails_validation_after_decoding_reports_failed()
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
 
     // The payload decodes into the typed command, then fails `validate_for_publish` because a
     // producer-authored extension field is present.
@@ -422,7 +423,7 @@ async fn a_subscription_command_that_fails_validation_reports_failed()
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
 
     let owner = Uuid::now_v7();
     let operation = Uuid::now_v7();
@@ -474,7 +475,7 @@ async fn a_command_that_cannot_be_attributed_is_still_terminated_without_a_repor
     let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
     let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
     database.apply_schema().await?;
-    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::Ru);
     let base = run_envelope(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let operation = Uuid::now_v7();
 
@@ -527,6 +528,55 @@ async fn a_command_that_cannot_be_attributed_is_still_terminated_without_a_repor
     .fetch_one(database.pool())
     .await?;
     assert_eq!(reports.0, 0, "an unattributable command produces no report");
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_worker_handler_passes_its_schedule_language_to_the_fan_out()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let owner = Uuid::now_v7();
+    SubscriptionRepository::new(database.pool().clone())
+        .set(owner, "handler_language", true, "2026-08-19T10:00:00Z")
+        .await?;
+    let occurrence_id = Uuid::now_v7();
+    let envelope = serde_json::json!({
+        "command_id": occurrence_id,
+        "command_type": "channel_digest.schedule.occurrence_requested.v1",
+        "issued_at": "2026-08-21T10:00:01Z",
+        "producer": "ratatoskr-platform",
+        "aggregate_id": format!("schedule-occurrence:{occurrence_id}"),
+        "correlation_id": format!("operation:{}", Uuid::now_v7()),
+        "tenant_id": format!("user:{}", Uuid::now_v7()),
+        "schema_version": 1,
+        "payload": {
+            "schedule_ref": format!("schedule:{}", Uuid::now_v7()),
+            "occurrence_ref": format!("schedule-occurrence:{occurrence_id}"),
+            "previous_due_at": "2026-08-20T10:00:00Z",
+            "due_at": "2026-08-21T10:00:00Z"
+        }
+    });
+    let handler = WorkerMessageHandler::new(database.pool().clone(), OutputLanguage::En);
+    assert_eq!(
+        handler
+            .handle(
+                "cmd.channel_digest.schedule.occurrence_requested.v1",
+                &serde_json::to_vec(&envelope)?,
+            )
+            .await,
+        DeliveryDisposition::Ack
+    );
+    let stored: (String,) = sqlx::query_as(
+        "select output_language from channel_digests.digest_runs where owner_id = $1 and idempotency_key = $2",
+    )
+    .bind(owner)
+    .bind(format!("schedule-occurrence:{occurrence_id}"))
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, "en");
     database.close().await;
     Ok(())
 }

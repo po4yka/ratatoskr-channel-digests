@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{
     CommandIntake, CoordinatorError, Database, DigestCoordinator, IntakeOutcome, OccurrenceRequest,
     ProviderError, ProviderPage, ProviderPost, PublicChannelProvider, PublicChannelUsername,
@@ -117,6 +118,7 @@ async fn a_scheduled_run_fails_without_a_report() -> TestResult {
             due_at: WINDOW_END,
             operation_id: occurrence_operation,
             owner_id: Uuid::now_v7(),
+            output_language: OutputLanguage::Ru,
         })
         .await?;
     assert_eq!(outcome, IntakeOutcome::Applied);

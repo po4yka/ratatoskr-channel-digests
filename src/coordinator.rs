@@ -6,7 +6,7 @@ use crate::reports::{self, OperationReportRow, ReportError};
 use crate::{CanonicalManifest, IntakeOutcome};
 use ratatoskr_channel_digest_contracts::{
     ChannelDigestRecapFailureCode, KnowledgeChannelDigestRecapCompleted,
-    KnowledgeChannelDigestRecapFailed, KnowledgeChannelDigestRecapRequested,
+    KnowledgeChannelDigestRecapFailed, KnowledgeChannelDigestRecapRequested, OutputLanguage,
 };
 use ratatoskr_operation_contracts::OperationStatus;
 use sha2::Digest as _;
@@ -93,6 +93,8 @@ pub struct OccurrenceRequest<'a> {
     pub operation_id: Uuid,
     /// Platform user that owns the schedule, the owner of the occurrence report.
     pub owner_id: Uuid,
+    /// Recap language of every run this occurrence creates.
+    pub output_language: OutputLanguage,
 }
 
 /// Durable coordinator for manifest and recap-request sequencing.
@@ -546,6 +548,7 @@ impl DigestCoordinator {
             due_at,
             operation_id,
             owner_id: report_owner,
+            output_language,
         } = *occurrence;
         if !occurrence_key.starts_with("schedule-occurrence:") {
             return Err(CoordinatorError::Invalid);
@@ -577,6 +580,7 @@ impl DigestCoordinator {
             occurrence_key,
             operation_id,
             (previous_due_at, due_at),
+            output_language,
         )
         .await?;
         OperationReportRow::new(
@@ -609,7 +613,12 @@ async fn fan_out(
     occurrence_key: &str,
     operation_id: Uuid,
     (previous_due_at, due_at): (&str, &str),
+    output_language: OutputLanguage,
 ) -> Result<(), CoordinatorError> {
+    let language = match output_language {
+        OutputLanguage::Ru => "ru",
+        OutputLanguage::En => "en",
+    };
     let owners: Vec<(Uuid, String)> = sqlx::query_as(
         "select owner_id, min(first_activated_at)::text from channel_digests.subscriptions where enabled and first_activated_at < $1::timestamptz group by owner_id order by owner_id",
     )
@@ -628,7 +637,7 @@ async fn fan_out(
         .await
         .map_err(|_| CoordinatorError::Storage)?;
         sqlx::query(
-            "insert into channel_digests.digest_runs (run_id, owner_id, operation_id, trigger, idempotency_key, window_start, window_end, state) values ($1, $2, $3, 'scheduled', $4, $5::timestamptz, $6::timestamptz, 'accepted') on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing",
+            "insert into channel_digests.digest_runs (run_id, owner_id, operation_id, trigger, idempotency_key, window_start, window_end, output_language, state) values ($1, $2, $3, 'scheduled', $4, $5::timestamptz, $6::timestamptz, $7, 'accepted') on conflict (owner_id, trigger, idempotency_key, window_start, window_end) do nothing",
         )
         .bind(Uuid::now_v7())
         .bind(owner_id)
@@ -636,6 +645,7 @@ async fn fan_out(
         .bind(occurrence_key)
         .bind(&window.0)
         .bind(&window.1)
+        .bind(language)
         .execute(&mut *connection)
         .await
         .map_err(|_| CoordinatorError::Storage)?;

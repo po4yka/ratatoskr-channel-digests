@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{
     Database, RegistrationOutcome, ScheduleConfig, enqueue_schedule_registration,
 };
@@ -19,6 +20,7 @@ async fn registration_row_is_enqueued_once_per_distinct_configuration()
         owner_user_id: owner,
         cron_expression: "0 6 * * *".to_owned(),
         enabled: true,
+        output_language: OutputLanguage::Ru,
     };
     let later = ScheduleConfig {
         cron_expression: "30 18 * * *".to_owned(),
