@@ -7,8 +7,12 @@ use ratatoskr_channel_digest_contracts::{
     ChannelDigestRunRequested, ChannelDigestRunTrigger, ChannelDigestSubscriptionSetRequested,
     OutputLanguage, SubscriptionDesiredState,
 };
+use ratatoskr_identifiers::{OperationId, TenantRef};
 use ratatoskr_operation_contracts::OperationStatus;
 use sha2::{Digest as _, Sha256};
+
+const SUBSCRIPTION_SUBJECT: &str = "channel_digest.subscription.set_requested.v1";
+const RUN_SUBJECT: &str = "channel_digest.run.requested.v1";
 
 /// Replay-safe intake result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,68 @@ impl From<ReportError> for IntakeError {
         match error {
             ReportError::Invalid => Self::Invalid,
             ReportError::Storage => Self::Storage,
+        }
+    }
+}
+
+/// The command a payload that did not decode claimed to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommandKind {
+    /// `channel_digest.subscription.set_requested.v1`.
+    Subscription,
+    /// `channel_digest.run.requested.v1`.
+    Run,
+}
+
+impl CommandKind {
+    fn subject(self) -> &'static str {
+        match self {
+            Self::Subscription => SUBSCRIPTION_SUBJECT,
+            Self::Run => RUN_SUBJECT,
+        }
+    }
+}
+
+/// A command refused for good, recorded as a failed inbox row and a failed operation report.
+struct Rejection<'a> {
+    message_id: Uuid,
+    subject: &'static str,
+    semantic_key: &'a str,
+    payload_sha256: &'a str,
+    operation_id: Uuid,
+    owner_id: Uuid,
+    reason: RejectionReason,
+}
+
+/// Closed reason a command is refused for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectionReason {
+    /// The owner already has 20 active subscriptions.
+    SubscriptionLimit,
+    /// The command is attributable but violates the contract or an invariant.
+    CommandInvalid,
+}
+
+impl RejectionReason {
+    fn class(self) -> &'static str {
+        match self {
+            Self::SubscriptionLimit => "subscription_limit",
+            Self::CommandInvalid => "command_invalid",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::SubscriptionLimit => "channel_digest.subscription_limit_reached",
+            Self::CommandInvalid => "channel_digest.command_invalid",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SubscriptionLimit => "At most 20 channels can be active at the same time.",
+            Self::CommandInvalid => "The command was rejected because it is not valid.",
         }
     }
 }
@@ -69,12 +135,22 @@ impl CommandIntake {
     ) -> Result<IntakeOutcome, IntakeError> {
         let command: ChannelDigestSubscriptionSetRequested =
             serde_json::from_slice(payload).map_err(|_| IntakeError::Invalid)?;
-        command
-            .validate_for_publish()
-            .map_err(|_| IntakeError::Invalid)?;
         let owner_id = command.owner.user_id().0;
         let semantic_key = command.idempotency_key.as_str();
         let payload_sha256 = format!("{:x}", Sha256::digest(payload));
+        if command.validate_for_publish().is_err() {
+            return self
+                .reject(&Rejection {
+                    message_id,
+                    subject: SUBSCRIPTION_SUBJECT,
+                    semantic_key,
+                    payload_sha256: &payload_sha256,
+                    operation_id: command.operation_id.0,
+                    owner_id,
+                    reason: RejectionReason::CommandInvalid,
+                })
+                .await;
+        }
         let mut transaction = self.pool.begin().await.map_err(|_| IntakeError::Storage)?;
         let inserted: Option<(Uuid,)> = sqlx::query_as(
             "insert into channel_digests.inbox_messages (message_id, subject, semantic_key, payload_sha256, state) values ($1, 'channel_digest.subscription.set_requested.v1', $2, $3, 'processing') on conflict do nothing returning message_id",
@@ -112,7 +188,15 @@ impl CommandIntake {
                 .await
                 .map_err(|_| IntakeError::Storage)?;
             return self
-                .reject_subscription_limit(message_id, &command, &payload_sha256)
+                .reject(&Rejection {
+                    message_id,
+                    subject: SUBSCRIPTION_SUBJECT,
+                    semantic_key,
+                    payload_sha256: &payload_sha256,
+                    operation_id: command.operation_id.0,
+                    owner_id,
+                    reason: RejectionReason::SubscriptionLimit,
+                })
                 .await;
         }
         OperationReportRow::new(
@@ -138,20 +222,59 @@ impl CommandIntake {
         Ok(IntakeOutcome::Applied)
     }
 
-    /// Records a limit refusal in a new transaction, because the refused one is aborted.
-    async fn reject_subscription_limit(
+    /// Refuses a payload that did not decode into its typed command, when it is attributable.
+    ///
+    /// The payload is attributable when it names an `operation_id` and an `owner` that equals the
+    /// envelope tenant the producer was authenticated for. It is recorded as a failed inbox row,
+    /// the operation reports `failed`, and the call returns success so the message is
+    /// acknowledged. Nothing else about the payload is read or stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError::Invalid`] when the payload cannot be attributed, and a storage class
+    /// when the rejection cannot be made durable.
+    pub async fn reject_unreadable(
         &self,
         message_id: Uuid,
-        command: &ChannelDigestSubscriptionSetRequested,
-        payload_sha256: &str,
+        kind: CommandKind,
+        tenant: &TenantRef,
+        payload: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<IntakeOutcome, IntakeError> {
+        let operation_id = payload
+            .get("operation_id")
+            .and_then(|value| serde_json::from_value::<OperationId>(value.clone()).ok())
+            .ok_or(IntakeError::Invalid)?;
+        let owner = payload
+            .get("owner")
+            .and_then(|value| serde_json::from_value::<TenantRef>(value.clone()).ok())
+            .ok_or(IntakeError::Invalid)?;
+        if &owner != tenant {
+            return Err(IntakeError::Invalid);
+        }
+        let digest = serde_json::to_vec(payload).map_err(|_| IntakeError::Invalid)?;
+        self.reject(&Rejection {
+            message_id,
+            subject: kind.subject(),
+            semantic_key: &format!("invalid:{message_id}"),
+            payload_sha256: &format!("{:x}", Sha256::digest(digest)),
+            operation_id: operation_id.0,
+            owner_id: owner.user_id().0,
+            reason: RejectionReason::CommandInvalid,
+        })
+        .await
+    }
+
+    /// Records a refusal in its own transaction, because a refused one may be aborted.
+    async fn reject(&self, rejection: &Rejection<'_>) -> Result<IntakeOutcome, IntakeError> {
         let mut transaction = self.pool.begin().await.map_err(|_| IntakeError::Storage)?;
         let inserted: Option<(Uuid,)> = sqlx::query_as(
-            "insert into channel_digests.inbox_messages (message_id, subject, semantic_key, payload_sha256, state, completed_at, safe_failure_class) values ($1, 'channel_digest.subscription.set_requested.v1', $2, $3, 'failed', now(), 'subscription_limit') on conflict do nothing returning message_id",
+            "insert into channel_digests.inbox_messages (message_id, subject, semantic_key, payload_sha256, state, completed_at, safe_failure_class) values ($1, $2, $3, $4, 'failed', now(), $5) on conflict do nothing returning message_id",
         )
-        .bind(message_id)
-        .bind(command.idempotency_key.as_str())
-        .bind(payload_sha256)
+        .bind(rejection.message_id)
+        .bind(rejection.subject)
+        .bind(rejection.semantic_key)
+        .bind(rejection.payload_sha256)
+        .bind(rejection.reason.class())
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| IntakeError::Storage)?;
@@ -163,17 +286,13 @@ impl CommandIntake {
             return Ok(IntakeOutcome::Replayed);
         }
         OperationReportRow::new(
-            command.operation_id.0,
-            command.owner.user_id().0,
+            rejection.operation_id,
+            rejection.owner_id,
             OperationStatus::Failed,
             "rejected",
         )?
-        .caused_by(format!("command:{message_id}"))
-        .with_error(
-            "channel_digest.subscription_limit_reached",
-            "At most 20 channels can be active at the same time.",
-            false,
-        )?
+        .caused_by(format!("command:{}", rejection.message_id))
+        .with_error(rejection.reason.code(), rejection.reason.message(), false)?
         .enqueue(&mut transaction)
         .await?;
         transaction
@@ -195,12 +314,21 @@ impl CommandIntake {
     ) -> Result<IntakeOutcome, IntakeError> {
         let command: ChannelDigestRunRequested =
             serde_json::from_slice(payload).map_err(|_| IntakeError::Invalid)?;
-        command
-            .validate_for_publish()
-            .map_err(|_| IntakeError::Invalid)?;
         let owner_id = command.owner.user_id().0;
         let semantic_key = command.idempotency_key.as_str();
         let payload_sha256 = format!("{:x}", Sha256::digest(payload));
+        let invalid = Rejection {
+            message_id,
+            subject: RUN_SUBJECT,
+            semantic_key,
+            payload_sha256: &payload_sha256,
+            operation_id: command.operation_id.0,
+            owner_id,
+            reason: RejectionReason::CommandInvalid,
+        };
+        if command.validate_for_publish().is_err() {
+            return self.reject(&invalid).await;
+        }
         let on_demand = matches!(command.trigger, ChannelDigestRunTrigger::OnDemand { .. });
         let mut transaction = self.pool.begin().await.map_err(|_| IntakeError::Storage)?;
         let inserted: Option<(Uuid,)> = sqlx::query_as(
@@ -208,7 +336,7 @@ impl CommandIntake {
         )
         .bind(message_id)
         .bind(semantic_key)
-        .bind(payload_sha256)
+        .bind(&payload_sha256)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| IntakeError::Storage)?;
@@ -234,7 +362,11 @@ impl CommandIntake {
         .await
         .map_err(|_| IntakeError::Storage)?;
         if selected.0 != run_id {
-            return Err(IntakeError::Invalid);
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| IntakeError::Storage)?;
+            return self.reject(&invalid).await;
         }
         let output_language = match command.output_language {
             OutputLanguage::Ru => "ru",

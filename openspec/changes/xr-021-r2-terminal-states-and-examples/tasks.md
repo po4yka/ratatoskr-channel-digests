@@ -5,8 +5,8 @@
 
 ## 2. Attributable rejects (R2-05 b)
 
-- [ ] 2.1 RED: add `tests/worker_messages.rs::a_run_command_that_fails_validation_after_decoding_reports_failed` and its subscription and unattributable companions; run them and confirm they fail because the message is Termed and no report exists.
-- [ ] 2.2 GREEN: classify invalid commands into attributable and unattributable in `src/bus.rs` and `src/intake.rs`, and report through `src/reports.rs`.
+- [x] 2.1 RED: add `tests/worker_messages.rs::a_run_command_that_fails_validation_after_decoding_reports_failed` and its subscription and unattributable companions; run them and confirm they fail because the message is Termed and no report exists.
+- [x] 2.2 GREEN: classify invalid commands into attributable and unattributable in `src/bus.rs` and `src/intake.rs`, and report through `src/reports.rs`.
 
 ## 3. Page size clamp (R2-05 e)
 

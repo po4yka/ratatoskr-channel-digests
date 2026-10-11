@@ -35,7 +35,7 @@ pub use coordinator::{CoordinatorError, DigestCoordinator, OccurrenceRequest};
 pub use database::{Database, DatabaseError};
 pub use envelopes::{OutboundMessage, OutboxRow, wrap_outbox_row};
 pub use executor::{RunExecutionError, RunExecutor};
-pub use intake::{CommandIntake, IntakeError, IntakeOutcome};
+pub use intake::{CommandIntake, CommandKind, IntakeError, IntakeOutcome};
 pub use maintenance::{Maintenance, MaintenanceError};
 pub use manifest::{CanonicalManifest, ManifestBuilder, ManifestError, ManifestSource};
 pub use provider::{

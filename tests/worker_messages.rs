@@ -289,3 +289,244 @@ async fn schedule_occurrence_accepts_a_platform_contract_envelope_and_terminates
     database.close().await;
     Ok(())
 }
+
+const RUN_SUBJECT: &str = "cmd.channel_digest.run.requested.v1";
+const SUBSCRIPTION_SUBJECT: &str = "cmd.channel_digest.subscription.set_requested.v1";
+
+fn run_envelope(owner: Uuid, operation: Uuid, command_id: Uuid) -> serde_json::Value {
+    let run_id = Uuid::now_v7();
+    serde_json::json!({
+        "command_id": command_id,
+        "command_type": "channel_digest.run.requested.v1",
+        "issued_at": "2026-08-29T10:00:00Z",
+        "producer": "ratatoskr-platform",
+        "aggregate_id": format!("channel-digest-run:{run_id}"),
+        "correlation_id": format!("operation:{operation}"),
+        "tenant_id": format!("user:{owner}"),
+        "schema_version": 1,
+        "payload": {
+            "operation_id": operation,
+            "owner": format!("user:{owner}"),
+            "digest_run_id": run_id,
+            "idempotency_key": format!("operation.{operation}"),
+            "window": {"start_at": "2026-08-28T10:00:00Z", "end_at": "2026-08-29T10:00:00Z"},
+            "output_language": "ru",
+            "trigger": {"kind": "on_demand", "accepted_at": "2026-08-29T10:00:00Z"}
+        }
+    })
+}
+
+fn subscription_envelope(owner: Uuid, operation: Uuid, command_id: Uuid) -> serde_json::Value {
+    serde_json::json!({
+        "command_id": command_id,
+        "command_type": "channel_digest.subscription.set_requested.v1",
+        "issued_at": "2026-08-29T10:00:00Z",
+        "producer": "ratatoskr-platform",
+        "aggregate_id": format!("operation:{operation}"),
+        "correlation_id": format!("operation:{operation}"),
+        "tenant_id": format!("user:{owner}"),
+        "schema_version": 1,
+        "payload": {
+            "operation_id": operation,
+            "owner": format!("user:{owner}"),
+            "idempotency_key": format!("operation.{operation}"),
+            "channel_username": "rejected_channel",
+            "desired_state": "active"
+        }
+    })
+}
+
+async fn rejection_state(
+    database: &Database,
+    operation: Uuid,
+    command_id: Uuid,
+) -> Result<(i64, Vec<(String, String, bool)>, Option<String>), Box<dyn std::error::Error>> {
+    let reports: Vec<(String, String, bool)> = sqlx::query_as(
+        "select semantic_key, payload->'error'->>'code', (payload->'error'->>'retryable')::boolean
+         from channel_digests.outbox_messages
+         where subject = 'platform.operation.reported.v1' and operation_id = $1
+         order by created_at, outbox_id",
+    )
+    .bind(operation)
+    .fetch_all(database.pool())
+    .await?;
+    let runs: (i64,) =
+        sqlx::query_as("select count(*) from channel_digests.digest_runs where operation_id = $1")
+            .bind(operation)
+            .fetch_one(database.pool())
+            .await?;
+    let inbox: Option<(String,)> =
+        sqlx::query_as("select state from channel_digests.inbox_messages where message_id = $1")
+            .bind(command_id)
+            .fetch_optional(database.pool())
+            .await?;
+    Ok((runs.0, reports, inbox.map(|row| row.0)))
+}
+
+#[tokio::test]
+async fn a_run_command_that_fails_validation_after_decoding_reports_failed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let handler = WorkerMessageHandler::new(database.pool().clone());
+
+    // The payload decodes into the typed command, then fails `validate_for_publish` because a
+    // producer-authored extension field is present.
+    let owner = Uuid::now_v7();
+    let operation = Uuid::now_v7();
+    let command_id = Uuid::now_v7();
+    let mut extension = run_envelope(owner, operation, command_id);
+    extension["payload"]["surprise"] = serde_json::json!(1);
+    // The payload does not decode into the typed command (the window is longer than the contract
+    // allows) but it still names its operation, and its owner matches the envelope tenant.
+    let long_owner = Uuid::now_v7();
+    let long_operation = Uuid::now_v7();
+    let long_command = Uuid::now_v7();
+    let mut too_long = run_envelope(long_owner, long_operation, long_command);
+    too_long["payload"]["window"]["start_at"] = serde_json::json!("2026-08-01T10:00:00Z");
+
+    for (envelope, operation, command_id) in [
+        (extension, operation, command_id),
+        (too_long, long_operation, long_command),
+    ] {
+        for _ in 0..2 {
+            assert_eq!(
+                handler
+                    .handle(RUN_SUBJECT, &serde_json::to_vec(&envelope)?)
+                    .await,
+                DeliveryDisposition::Ack,
+                "an attributable invalid command is acknowledged, not terminated"
+            );
+        }
+        let (runs, reports, inbox) = rejection_state(&database, operation, command_id).await?;
+        assert_eq!(runs, 0, "an invalid command creates no run");
+        assert_eq!(
+            reports,
+            [(
+                format!("operation:{operation}:failed"),
+                "channel_digest.command_invalid".to_owned(),
+                false
+            )],
+            "exactly one non-retryable failed report"
+        );
+        assert_eq!(inbox.as_deref(), Some("failed"));
+    }
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_subscription_command_that_fails_validation_reports_failed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let handler = WorkerMessageHandler::new(database.pool().clone());
+
+    let owner = Uuid::now_v7();
+    let operation = Uuid::now_v7();
+    let command_id = Uuid::now_v7();
+    let mut extension = subscription_envelope(owner, operation, command_id);
+    extension["payload"]["surprise"] = serde_json::json!(1);
+    let bad_owner = Uuid::now_v7();
+    let bad_operation = Uuid::now_v7();
+    let bad_command = Uuid::now_v7();
+    let mut bad_name = subscription_envelope(bad_owner, bad_operation, bad_command);
+    bad_name["payload"]["channel_username"] = serde_json::json!("Not A Channel");
+
+    for (envelope, operation, command_id) in [
+        (extension, operation, command_id),
+        (bad_name, bad_operation, bad_command),
+    ] {
+        assert_eq!(
+            handler
+                .handle(SUBSCRIPTION_SUBJECT, &serde_json::to_vec(&envelope)?)
+                .await,
+            DeliveryDisposition::Ack
+        );
+        let (_, reports, inbox) = rejection_state(&database, operation, command_id).await?;
+        assert_eq!(
+            reports,
+            [(
+                format!("operation:{operation}:failed"),
+                "channel_digest.command_invalid".to_owned(),
+                false
+            )]
+        );
+        assert_eq!(inbox.as_deref(), Some("failed"));
+    }
+    let stored: (i64,) = sqlx::query_as(
+        "select count(*) from channel_digests.subscriptions where owner_id in ($1, $2)",
+    )
+    .bind(owner)
+    .bind(bad_owner)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, 0, "a rejected subscription must not exist");
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_command_that_cannot_be_attributed_is_still_terminated_without_a_report()
+-> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let handler = WorkerMessageHandler::new(database.pool().clone());
+    let base = run_envelope(Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let operation = Uuid::now_v7();
+
+    let mut no_operation = base.clone();
+    no_operation["payload"]
+        .as_object_mut()
+        .ok_or("payload object")?
+        .remove("operation_id");
+    let mut garbage = base.clone();
+    garbage["payload"] = serde_json::json!({"garbage": true});
+    let mut foreign_producer = run_envelope(Uuid::now_v7(), operation, Uuid::now_v7());
+    foreign_producer["producer"] = serde_json::json!("foreign-service");
+    foreign_producer["payload"]["surprise"] = serde_json::json!(1);
+    let mut foreign_owner = run_envelope(Uuid::now_v7(), operation, Uuid::now_v7());
+    foreign_owner["payload"]["owner"] = serde_json::json!(format!("user:{}", Uuid::now_v7()));
+    foreign_owner["payload"]["surprise"] = serde_json::json!(1);
+    let mut no_tenant = run_envelope(Uuid::now_v7(), operation, Uuid::now_v7());
+    no_tenant["payload"]["surprise"] = serde_json::json!(1);
+    no_tenant
+        .as_object_mut()
+        .ok_or("envelope object")?
+        .remove("tenant_id");
+    let mut wrong_type = run_envelope(Uuid::now_v7(), operation, Uuid::now_v7());
+    wrong_type["command_type"] = serde_json::json!("channel_digest.subscription.set_requested.v1");
+    wrong_type["payload"]["surprise"] = serde_json::json!(1);
+
+    for envelope in [
+        no_operation,
+        garbage,
+        foreign_producer,
+        foreign_owner,
+        no_tenant,
+        wrong_type,
+    ] {
+        assert_eq!(
+            handler
+                .handle(RUN_SUBJECT, &serde_json::to_vec(&envelope)?)
+                .await,
+            DeliveryDisposition::Term
+        );
+    }
+    assert_eq!(
+        handler.handle(RUN_SUBJECT, b"{not json").await,
+        DeliveryDisposition::Term
+    );
+    let reports: (i64,) = sqlx::query_as(
+        "select count(*) from channel_digests.outbox_messages where operation_id = $1",
+    )
+    .bind(operation)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(reports.0, 0, "an unattributable command produces no report");
+    database.close().await;
+    Ok(())
+}

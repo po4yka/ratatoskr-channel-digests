@@ -21,7 +21,9 @@ use uuid::Uuid;
 use crate::config::BusConfig;
 use crate::envelopes::{OutboundMessage, OutboxRow, wrap_outbox_row};
 use crate::runtime::WorkerReadiness;
-use crate::{CommandIntake, CoordinatorError, DigestCoordinator, IntakeError, OccurrenceRequest};
+use crate::{
+    CommandIntake, CommandKind, CoordinatorError, DigestCoordinator, IntakeError, OccurrenceRequest,
+};
 
 const SUBSCRIPTION_SUBJECT: &str = "cmd.channel_digest.subscription.set_requested.v1";
 const RUN_SUBJECT: &str = "cmd.channel_digest.run.requested.v1";
@@ -151,7 +153,9 @@ impl WorkerMessageHandler {
                     return DeliveryDisposition::Term;
                 }
                 let Ok(payload) = serde_json::to_vec(&command) else {
-                    return DeliveryDisposition::Term;
+                    return self
+                        .reject_unreadable(&envelope, CommandKind::Subscription)
+                        .await;
                 };
                 CommandIntake::new(self.pool.clone())
                     .accept_subscription(envelope.command_id.0, &payload)
@@ -168,7 +172,7 @@ impl WorkerMessageHandler {
                     return DeliveryDisposition::Term;
                 }
                 let Ok(payload) = serde_json::to_vec(&command) else {
-                    return DeliveryDisposition::Term;
+                    return self.reject_unreadable(&envelope, CommandKind::Run).await;
                 };
                 CommandIntake::new(self.pool.clone())
                     .accept_run(envelope.command_id.0, &payload)
@@ -190,6 +194,28 @@ impl WorkerMessageHandler {
         if envelope.producer.as_str() != KNOWLEDGE_PRODUCER {
             return DeliveryDisposition::Term;
         }
+    /// Reports a command whose payload does not decode but names its operation and owner.
+    ///
+    /// Only a payload whose owner equals the envelope tenant is attributable; anything else stays
+    /// terminated without a report.
+    async fn reject_unreadable(
+        &self,
+        envelope: &CommandEnvelope,
+        kind: CommandKind,
+    ) -> DeliveryDisposition {
+        let Some(tenant) = envelope.tenant_id else {
+            return DeliveryDisposition::Term;
+        };
+        match CommandIntake::new(self.pool.clone())
+            .reject_unreadable(envelope.command_id.0, kind, &tenant, &envelope.payload)
+            .await
+        {
+            Ok(_) => DeliveryDisposition::Ack,
+            Err(IntakeError::Invalid) => DeliveryDisposition::Term,
+            Err(IntakeError::Storage) => DeliveryDisposition::Nak,
+        }
+    }
+
         let coordinator = DigestCoordinator::new(self.pool.clone());
         let result = match subject {
             COMPLETED_SUBJECT => {
