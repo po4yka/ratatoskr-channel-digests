@@ -51,6 +51,8 @@ worker at it with `RATATOSKR__BUS__NKEY_SEED_PATH` (absolute path, worker role o
 rejects the key). The seed is read when the worker connects and is never logged. Leave the key unset
 only for an unauthenticated local development broker.
 
+The worker connection uses the inbox prefix `_INBOX_channel_digests`, and the ACL lets this identity subscribe to exactly `_INBOX_channel_digests.>` and nothing else (XR-021 R3-01). JetStream replies and fetched messages therefore never travel on the shared `_INBOX` namespace where another service could read them. A worker built before this change cannot complete JetStream requests under the narrowed ACL: reload NATS and deploy the services of one snapshot together.
+
 Start order on a fresh broker: reload NATS with the ACL, start Edge so it provisions the fixed
 durables, then start the worker; the worker verifies each durable and stays unready until all five
 match.

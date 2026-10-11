@@ -37,6 +37,9 @@ const PLACEHOLDER: &str = "UREPLACE_ME_WITH_THE_PUBLIC_NKEY_OF_RATATOSKR_CHANNEL
 const NATS_IMAGE: &str =
     "nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da";
 
+/// The inbox prefix of S03 and R3-01: the one subscription this identity is granted.
+const INBOX_PREFIX: &str = "_INBOX_channel_digests";
+
 const COMMANDS: &str = "ratatoskr_commands";
 const EVENTS: &str = "ratatoskr_events";
 
@@ -99,7 +102,11 @@ fn the_fragment_grants_exactly_the_contract() -> TestResult {
         quoted_strings(section(&code, "publish")?),
         contract_publish_allow()
     );
-    assert_eq!(quoted_strings(section(&code, "subscribe")?), ["_INBOX.>"]);
+    assert_eq!(
+        quoted_strings(section(&code, "subscribe")?),
+        [format!("{INBOX_PREFIX}.>")],
+        "the identity may subscribe to its own inbox prefix and nothing else"
+    );
     assert!(
         !code.contains("deny"),
         "no stanza except EDGE has a deny block"
@@ -208,6 +215,85 @@ async fn channel_digests_identity_gets_exactly_its_grants_on_an_authorized_broke
         described.is_err(),
         "describing Knowledge's durable is not granted"
     );
+    drop(broker);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_worker_completes_jetstream_requests_under_its_inbox_prefix() -> TestResult {
+    let fragment = std::fs::read_to_string(FRAGMENT)?;
+    let admin = nkeys::KeyPair::new_user();
+    let digests = nkeys::KeyPair::new_user();
+    let workdir = Workdir::new()?;
+    let seed_path = workdir.path.join("channel-digests.nkey");
+    std::fs::write(&seed_path, format!("{}\n", digests.seed()?))?;
+    std::fs::set_permissions(&seed_path, std::fs::Permissions::from_mode(0o600))?;
+    let identity = render_identity(&fragment, &digests.public_key())?;
+    let broker = Broker::start(&workdir, &admin.public_key(), &identity)?;
+    let url = format!("nats://127.0.0.1:{}", broker.port);
+    let admin_client = async_nats::ConnectOptions::with_nkey(admin.seed()?)
+        .connect(&url)
+        .await?;
+    provision(&jetstream::new(admin_client.clone())).await?;
+
+    // Every JetStream request and every fetched message travels on the connection's inbox, so the
+    // worker's own connection function must stay inside the one prefix the broker grants it.
+    let client = connect(&url, Some(&seed_path)).await?;
+    let context = jetstream::new(client.clone());
+    verify_consumers(&context)
+        .await
+        .map_err(|error| format!("all five durables must verify under the prefix: {error}"))?;
+    let runs: jetstream::consumer::PullConsumer = context
+        .get_consumer_from_stream("ratatoskr_channel_digest_runs", COMMANDS)
+        .await?;
+    jetstream::new(admin_client.clone())
+        .publish("cmd.channel_digest.run.requested.v1", "{}".into())
+        .await?
+        .await?;
+    let mut batch = runs
+        .fetch()
+        .max_messages(1)
+        .expires(Duration::from_secs(5))
+        .messages()
+        .await?;
+    batch
+        .next()
+        .await
+        .ok_or("no command was delivered")?
+        .map_err(|error| error.to_string())?
+        .double_ack()
+        .await
+        .map_err(|error| format!("the acknowledgement must complete: {error}"))?;
+    for row in outbox_rows()? {
+        let message = wrap_outbox_row(&row)?;
+        publish_message(&context, &message)
+            .await
+            .map_err(|error| format!("{} must be acknowledged: {error}", message.subject))?;
+    }
+
+    // The grant is the prefix alone: the shared namespace and a neighbour's prefix stay silent,
+    // next to a control that the same messages reach the prefix this identity owns.
+    let mut own = client.subscribe(format!("{INBOX_PREFIX}.probe")).await?;
+    let mut shared = client.subscribe("_INBOX.probe").await?;
+    let mut neighbour = client.subscribe("_INBOX_knowledge.probe").await?;
+    client.flush().await?;
+    for subject in [
+        format!("{INBOX_PREFIX}.probe"),
+        "_INBOX.probe".to_owned(),
+        "_INBOX_knowledge.probe".to_owned(),
+    ] {
+        admin_client.publish(subject, "probe".into()).await?;
+    }
+    admin_client.flush().await?;
+    let delivered = tokio::time::timeout(Duration::from_secs(2), own.next()).await?;
+    assert!(delivered.is_some(), "the own prefix must receive replies");
+    for (name, subscription) in [("_INBOX.>", &mut shared), ("a neighbour", &mut neighbour)] {
+        let leaked = tokio::time::timeout(Duration::from_millis(700), subscription.next()).await;
+        assert!(
+            leaked.is_err(),
+            "{name} is not this identity's to subscribe to"
+        );
+    }
     drop(broker);
     Ok(())
 }
@@ -468,7 +554,7 @@ impl Drop for Broker {
 
 /// A free loopback port, preferring the block reserved for private test brokers.
 fn free_port() -> Result<u16, std::io::Error> {
-    for port in 57_090..=57_099 {
+    for port in 57_690..=57_699 {
         if TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok() {
             return Ok(port);
         }

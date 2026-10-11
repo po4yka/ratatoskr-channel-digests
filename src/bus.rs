@@ -284,7 +284,15 @@ fn occurrence_authority(envelope: &CommandEnvelope) -> Option<(Uuid, Uuid)> {
 /// Expected acknowledgement wait of every durable Edge provisions for this service.
 const ACK_WAIT: Duration = Duration::from_secs(30);
 
-/// Connects to the broker, authenticating with an nkey seed when a path is given.
+/// Inbox prefix of the worker connection (XR-021 CONTRACTS.md R3-01).
+///
+/// The deployed ACL lets this identity subscribe to exactly `_INBOX_channel_digests.>`, so a
+/// JetStream reply or a fetched message can never be read by another service on the shared
+/// `_INBOX` namespace, and this service cannot read theirs.
+const INBOX_PREFIX: &str = "_INBOX_channel_digests";
+
+/// Connects to the broker, authenticating with an nkey seed when a path is given, with the
+/// service's own inbox prefix.
 ///
 /// The seed is read from the file at connection time, never logged, and dropped after the
 /// connection options are built.
@@ -307,6 +315,7 @@ pub async fn connect(
         None => async_nats::ConnectOptions::new(),
     };
     options
+        .custom_inbox_prefix(INBOX_PREFIX)
         .connect(endpoint)
         .await
         .map_err(|_| BusError::Unavailable)
