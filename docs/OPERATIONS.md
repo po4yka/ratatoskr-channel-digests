@@ -93,7 +93,7 @@ in `accepted`, `acquiring` or `waiting_recap` after its last update. The worker'
 30 seconds on its own task, so it keeps working while the Telegram provider or the bus is down and it
 never changes readiness. An overdue run becomes `failed` with `deadline_exceeded` and its Platform
 operation is reported `failed` with the retryable code `channel_digest.run_deadline_exceeded`; the
-worker logs only the count and the class. A recap that arrives later is ignored. Raise the deadline
+worker logs only the count and the class. A recap that arrives later is ignored. An accepted on-demand run is reported `queued` (stage `awaiting_acquisition`) and becomes `running` (stage `acquiring`) only when the executor starts it, which needs the Telegram provider connected; while the provider is down the operation stays `queued` until this deadline fails it. Raise the deadline
 rather than the Knowledge retry budget if recaps legitimately take longer.
 
 ## Rejected commands

@@ -7,7 +7,7 @@ use ratatoskr_channel_digest_contracts::OutputLanguage;
 use ratatoskr_channel_digests::{
     CommandIntake, Database, DigestCoordinator, IntakeOutcome, ObservedRevision, OccurrenceRequest,
     ProviderError, ProviderPage, ProviderPost, PublicChannelProvider, PublicChannelUsername,
-    RevisionRepository, RunExecutor, SubscriptionRepository,
+    Reaper, RevisionRepository, RunExecutor, SubscriptionRepository,
 };
 use ratatoskr_operation_contracts::{OperationReported, OperationStage, OperationStatus};
 use serde_json::{Value, json};
@@ -127,13 +127,13 @@ async fn zero_source_run_reports_succeeded() -> TestResult {
     let state = run_state(database.pool(), run_id).await?;
     assert_eq!(state.0, "completed");
     let reports = raw_reports(database.pool(), operation).await?;
-    assert_eq!(statuses(&reports), ["running", "succeeded"]);
-    let running = typed(&reports, 0)?;
+    assert_eq!(statuses(&reports), ["queued", "running", "succeeded"]);
+    let running = typed(&reports, 1)?;
     assert_eq!(
         running.stage.as_ref().map(OperationStage::as_str),
         Some("acquiring")
     );
-    let finished = typed(&reports, 1)?;
+    let finished = typed(&reports, 2)?;
     assert!(finished.results.is_empty(), "no source means no result");
     assert!(finished.error.is_none());
     let manifests: (i64,) =
@@ -172,8 +172,11 @@ async fn completion_with_omitted_sources_reports_partially_succeeded_with_warnin
     assert_eq!(outcome, IntakeOutcome::Applied);
 
     let reports = raw_reports(database.pool(), operation).await?;
-    assert_eq!(statuses(&reports), ["running", "partially_succeeded"]);
-    let report = typed(&reports, 1)?;
+    assert_eq!(
+        statuses(&reports),
+        ["queued", "running", "partially_succeeded"]
+    );
+    let report = typed(&reports, 2)?;
     assert_eq!(report.status, OperationStatus::PartiallySucceeded);
     assert_eq!(report.warnings.len(), 1);
     assert_eq!(
@@ -218,8 +221,8 @@ async fn completion_without_omitted_sources_reports_succeeded_with_the_result_re
         .await?;
 
     let reports = raw_reports(database.pool(), operation).await?;
-    assert_eq!(statuses(&reports), ["running", "succeeded"]);
-    let report = typed(&reports, 1)?;
+    assert_eq!(statuses(&reports), ["queued", "running", "succeeded"]);
+    let report = typed(&reports, 2)?;
     assert!(report.warnings.is_empty());
     assert_eq!(report.results.len(), 1);
     assert_eq!(
@@ -256,8 +259,12 @@ async fn knowledge_failure_reports_failed_with_mapped_code() -> TestResult {
         assert_eq!(outcome, IntakeOutcome::Applied);
 
         let reports = raw_reports(database.pool(), operation).await?;
-        assert_eq!(statuses(&reports), ["running", "failed"], "{failure_code}");
-        let report = typed(&reports, 1)?;
+        assert_eq!(
+            statuses(&reports),
+            ["queued", "running", "failed"],
+            "{failure_code}"
+        );
+        let report = typed(&reports, 2)?;
         let error = report
             .error
             .as_ref()
@@ -281,6 +288,16 @@ async fn acquisition_failure_reports_failed_in_the_same_transaction_as_the_state
     subscribe(&database, owner, "report_unavailable").await?;
     let operation = Uuid::now_v7();
     let run_id = accept_run(&database, owner, operation).await?;
+    // A flood wait lets the run start (the `running` report) and stay in `acquiring`; once it is
+    // lifted the same run meets an unavailable provider.
+    assert!(
+        RunExecutor::new(database.pool().clone(), WaitProvider)
+            .execute_one()
+            .await?
+    );
+    sqlx::query("delete from channel_digests.leases")
+        .execute(database.pool())
+        .await?;
     let executor = RunExecutor::new(database.pool().clone(), UnavailableProvider);
 
     // Fault injection: the report insert is refused, so a failure state that commits without
@@ -295,7 +312,7 @@ async fn acquisition_failure_reports_failed_in_the_same_transaction_as_the_state
         during?.0, "acquiring",
         "the failed state must not commit without its report"
     );
-    assert_eq!(statuses(&reports_during?), ["running"]);
+    assert_eq!(statuses(&reports_during?), ["queued", "running"]);
 
     assert!(executor.execute_one().await?);
     let state = run_state(database.pool(), run_id).await?;
@@ -304,8 +321,8 @@ async fn acquisition_failure_reports_failed_in_the_same_transaction_as_the_state
         ("failed".to_owned(), Some("provider_unavailable".to_owned()))
     );
     let reports = raw_reports(database.pool(), operation).await?;
-    assert_eq!(statuses(&reports), ["running", "failed"]);
-    let error = typed(&reports, 1)?
+    assert_eq!(statuses(&reports), ["queued", "running", "failed"]);
+    let error = typed(&reports, 2)?
         .error
         .ok_or("the failed report carries an error")?;
     assert_eq!(error.code.as_str(), "channel_digest.provider_unavailable");
@@ -349,8 +366,8 @@ async fn manifest_limit_fails_the_run_instead_of_retrying_forever() -> TestResul
         ("failed".to_owned(), Some("manifest_invalid".to_owned()))
     );
     let reports = raw_reports(database.pool(), operation).await?;
-    assert_eq!(statuses(&reports), ["running", "failed"]);
-    let error = typed(&reports, 1)?
+    assert_eq!(statuses(&reports), ["queued", "running", "failed"]);
+    let error = typed(&reports, 2)?
         .error
         .ok_or("the failed report carries an error")?;
     assert_eq!(error.code.as_str(), "channel_digest.manifest_invalid");
@@ -437,6 +454,104 @@ async fn occurrence_reports_succeeded_on_its_own_operation_and_scheduled_runs_re
         1,
         "a scheduled run is owned by no Platform operation and reports nothing"
     );
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_accepted_on_demand_run_is_reported_queued_awaiting_acquisition() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "report_queued").await?;
+    let operation = Uuid::now_v7();
+    accept_run(&database, owner, operation).await?;
+
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(
+        statuses(&reports),
+        ["queued"],
+        "nothing acquires yet, so nothing is running"
+    );
+    assert_eq!(
+        typed(&reports, 0)?
+            .stage
+            .as_ref()
+            .map(OperationStage::as_str),
+        Some("awaiting_acquisition")
+    );
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn starting_acquisition_reports_running_acquiring_once() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "report_started").await?;
+    let operation = Uuid::now_v7();
+    let run_id = accept_run(&database, owner, operation).await?;
+
+    assert!(
+        RunExecutor::new(database.pool().clone(), WaitProvider)
+            .execute_one()
+            .await?
+    );
+    assert_eq!(run_state(database.pool(), run_id).await?.0, "acquiring");
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(statuses(&reports), ["queued", "running"]);
+    assert_eq!(
+        typed(&reports, 1)?
+            .stage
+            .as_ref()
+            .map(OperationStage::as_str),
+        Some("acquiring")
+    );
+
+    // The flood wait is lifted, so the same run in `acquiring` is executed again.
+    sqlx::query("delete from channel_digests.leases")
+        .execute(database.pool())
+        .await?;
+    execute_with_posts(&database, 1).await?;
+    assert_eq!(run_state(database.pool(), run_id).await?.0, "waiting_recap");
+    assert_eq!(
+        statuses(&raw_reports(database.pool(), operation).await?),
+        ["queued", "running"],
+        "a second execution of the same run queues no second running report"
+    );
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_deadline_reaper_still_fails_a_queued_run() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "report_reaped").await?;
+    let operation = Uuid::now_v7();
+    let run_id = accept_run(&database, owner, operation).await?;
+    sqlx::query(
+        "update channel_digests.digest_runs set updated_at = '2026-08-29T11:00:00Z'::timestamptz where run_id = $1",
+    )
+    .bind(run_id)
+    .execute(database.pool())
+    .await?;
+
+    let reaped = Reaper::new(database.pool().clone(), Duration::from_mins(30))
+        .reap_once("2026-08-29T12:00:00Z".parse()?)
+        .await?;
+
+    assert_eq!(reaped, 1);
+    assert_eq!(
+        run_state(database.pool(), run_id).await?,
+        ("failed".to_owned(), Some("deadline_exceeded".to_owned()))
+    );
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(statuses(&reports), ["queued", "failed"]);
+    let error = typed(&reports, 1)?
+        .error
+        .ok_or("the failed report carries an error")?;
+    assert_eq!(error.code.as_str(), "channel_digest.run_deadline_exceeded");
+    assert!(error.retryable);
     database.close().await;
     Ok(())
 }
@@ -671,5 +786,28 @@ impl PublicChannelProvider for UnavailableProvider {
         _limit: usize,
     ) -> Result<ProviderPage, ProviderError> {
         Err(ProviderError::Unavailable)
+    }
+}
+
+#[derive(Debug)]
+struct WaitProvider;
+
+impl PublicChannelProvider for WaitProvider {
+    type Channel = String;
+
+    async fn resolve_public_channel(
+        &self,
+        username: &PublicChannelUsername,
+    ) -> Result<Self::Channel, ProviderError> {
+        Ok(username.as_str().to_owned())
+    }
+
+    async fn fetch_public_posts(
+        &self,
+        _channel: &Self::Channel,
+        _before_message_id: Option<i64>,
+        _limit: usize,
+    ) -> Result<ProviderPage, ProviderError> {
+        Err(ProviderError::FloodWait(Duration::from_mins(1)))
     }
 }

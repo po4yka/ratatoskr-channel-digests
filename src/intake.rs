@@ -382,11 +382,12 @@ impl CommandIntake {
         .await
         .map_err(|_| IntakeError::Storage)?;
         if on_demand {
+            // Nothing acquires until the executor starts the run, which can wait for the provider.
             OperationReportRow::new(
                 command.operation_id.0,
                 owner_id,
-                OperationStatus::Running,
-                "acquiring",
+                OperationStatus::Queued,
+                "awaiting_acquisition",
             )?
             .caused_by(format!("command:{message_id}"))
             .enqueue(&mut transaction)

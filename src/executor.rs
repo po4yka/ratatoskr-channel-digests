@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use ratatoskr_operation_contracts::OperationStatus;
+
 use crate::coordinator::RunFailure;
+use crate::reports::{self, OperationReportRow};
 use crate::{
     AcquisitionEngine, AcquisitionError, AcquisitionRequest, CanonicalManifest, DigestCoordinator,
     ManifestBuilder, ManifestSource, PublicChannelProvider, RevisionRepository,
@@ -76,7 +79,7 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         let Some(run) = self.select_pending().await? else {
             return Ok(false);
         };
-        if run.state == "accepted" && !self.begin_acquisition(run.run_id).await? {
+        if run.state == "accepted" && !self.begin_acquisition(&run).await? {
             return Ok(true);
         }
         let subscriptions = self.subscribed_channels(run.owner_id).await?;
@@ -95,7 +98,8 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         };
         self.record_acquisition(run.run_id, incomplete).await?;
         let sources = self.select_sources(&run).await?;
-        self.commit(&coordinator, &run, &sources, incomplete).await?;
+        self.commit(&coordinator, &run, &sources, incomplete)
+            .await?;
         Ok(true)
     }
 
@@ -134,15 +138,40 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         ))
     }
 
-    async fn begin_acquisition(&self, run_id: Uuid) -> Result<bool, RunExecutionError> {
+    /// Moves an accepted run to `acquiring` and reports an owned operation `running`.
+    ///
+    /// The state change and the report share one transaction, so the operation says `running`
+    /// exactly when acquisition has started. The outbox key `operation:<id>:running` keeps a
+    /// repeated attempt from queueing a second report.
+    async fn begin_acquisition(&self, run: &PendingRun) -> Result<bool, RunExecutionError> {
+        let mut transaction = self.pool.begin().await.map_err(|_| RunExecutionError)?;
         let changed = sqlx::query(
             "update channel_digests.digest_runs set state = 'acquiring', updated_at = now() where run_id = $1 and state = 'accepted'",
         )
-        .bind(run_id)
-        .execute(&self.pool)
+        .bind(run.run_id)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| RunExecutionError)?;
-        Ok(changed.rows_affected() == 1)
+        if changed.rows_affected() != 1 {
+            return Ok(false);
+        }
+        let owned = reports::on_demand_operation(&mut transaction, run.run_id, run.owner_id)
+            .await
+            .map_err(|_| RunExecutionError)?;
+        if let Some(operation) = owned {
+            OperationReportRow::new(
+                operation,
+                run.owner_id,
+                OperationStatus::Running,
+                "acquiring",
+            )
+            .map_err(|_| RunExecutionError)?
+            .enqueue(&mut transaction)
+            .await
+            .map_err(|_| RunExecutionError)?;
+        }
+        transaction.commit().await.map_err(|_| RunExecutionError)?;
+        Ok(true)
     }
 
     async fn subscribed_channels(

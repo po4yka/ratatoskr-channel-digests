@@ -108,7 +108,8 @@ reports, once per operation and status (outbox semantic key `operation:<id>:<sta
 | command rejected as invalid | `failed` | `rejected` | `channel_digest.command_invalid`, not retryable; see below |
 | run past its deadline | `failed` | `deadline` | `channel_digest.run_deadline_exceeded`, retryable, same transaction as the run's `failed` state |
 | 21st active subscription | `failed` | `rejected` | `channel_digest.subscription_limit_reached`, not retryable; the inbox row is failed and the message is acknowledged |
-| on-demand run accepted | `running` | `acquiring` | |
+| on-demand run accepted | `queued` | `awaiting_acquisition` | nothing acquires yet; with the provider down the operation stays queued until the deadline reaper fails it |
+| acquisition started | `running` | `acquiring` | queued in the transaction that moves the run from `accepted` to `acquiring`, once |
 | run selects no source and acquisition was complete | `succeeded` | `no_sources` | no results, same transaction as the run's `completed` state |
 | Knowledge completion | `succeeded` or `partially_succeeded` | `completed` | one `channel_digest.result` reference; omitted sources add the warning `channel_digest.context_omitted` and an incomplete acquisition adds `channel_digest.acquisition_incomplete`, either one making the status `partially_succeeded` |
 | Knowledge failure | `failed` | `recap` | `channel_digest.recap.<safe_failure_class>`, retryable for `provider_unavailable`, `provider_timeout`, `manifest_unavailable` |

@@ -132,7 +132,7 @@ async fn run_envelope_preserves_selected_identity_and_replays()
     .bind(command_id)
     .bind(&idempotency_key)
     .bind(owner)
-    .bind(format!("operation:{operation_id}:running"))
+    .bind(format!("operation:{operation_id}:queued"))
     .fetch_one(database.pool())
     .await?;
     assert_eq!(durable, (run_id, 1, 1));

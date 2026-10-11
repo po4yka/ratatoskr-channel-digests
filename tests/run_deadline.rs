@@ -46,14 +46,21 @@ async fn overdue_on_demand_runs_fail_once_each_with_a_retryable_report() -> Test
 
     assert_eq!(reaper.reap_once(clock()?).await?, 3);
 
-    for case in [&waiting, &acquiring, &accepted] {
+    // Only the run the executor started has reported `running`; the others never got that far.
+    let started: &[&str] = &["queued", "running", "failed"];
+    let unstarted: &[&str] = &["queued", "failed"];
+    for (case, expected) in [
+        (&waiting, started),
+        (&acquiring, unstarted),
+        (&accepted, unstarted),
+    ] {
         assert_eq!(
             run_state(database.pool(), case.run).await?,
             ("failed".to_owned(), Some("deadline_exceeded".to_owned()))
         );
         let reports = raw_reports(database.pool(), case.operation).await?;
-        assert_eq!(statuses(&reports), ["running", "failed"]);
-        let report = typed(&reports, 1)?;
+        assert_eq!(statuses(&reports), expected);
+        let report = typed(&reports, reports.len() - 1)?;
         let error = report
             .error
             .as_ref()
@@ -74,7 +81,7 @@ async fn overdue_on_demand_runs_fail_once_each_with_a_retryable_report() -> Test
     );
     assert_eq!(
         statuses(&raw_reports(database.pool(), young.operation).await?),
-        ["running"]
+        ["queued"]
     );
 
     assert_eq!(
@@ -185,7 +192,7 @@ async fn a_run_whose_failed_report_already_exists_gets_no_second_one() -> TestRe
     assert_eq!(reaped, 1);
     assert_eq!(run_state(database.pool(), case.run).await?.0, "failed");
     let reports = raw_reports(database.pool(), case.operation).await?;
-    assert_eq!(statuses(&reports), ["running", "failed"]);
+    assert_eq!(statuses(&reports), ["queued", "failed"]);
     let code = reports
         .iter()
         .find_map(|report| report.pointer("/error/code").and_then(Value::as_str));
@@ -259,9 +266,9 @@ async fn a_late_knowledge_fact_for_a_reaped_run_changes_nothing() -> TestResult 
             .await?;
     assert_eq!(results.0, 0);
     let reports = raw_reports(database.pool(), case.operation).await?;
-    assert_eq!(statuses(&reports), ["running", "failed"]);
+    assert_eq!(statuses(&reports), ["queued", "running", "failed"]);
     assert_eq!(
-        typed(&reports, 1)?
+        typed(&reports, 2)?
             .error
             .map(|error| error.code.as_str().to_owned()),
         Some("channel_digest.run_deadline_exceeded".to_owned())
