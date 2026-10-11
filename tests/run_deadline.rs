@@ -20,6 +20,8 @@ const WINDOW_END: &str = "2026-08-29T10:00:00Z";
 const POST_AT: &str = "2026-08-29T09:00:00Z";
 const DEADLINE: Duration = Duration::from_mins(30);
 const OVERDUE_SECONDS: f64 = 3_600.0;
+/// The instant every reap in this file observes; run ages are stored relative to it, never to real time.
+const CLOCK: &str = "2026-08-29T12:00:00Z";
 
 #[tokio::test]
 async fn overdue_on_demand_runs_fail_once_each_with_a_retryable_report() -> TestResult {
@@ -36,12 +38,13 @@ async fn overdue_on_demand_runs_fail_once_each_with_a_retryable_report() -> Test
     set_state(database.pool(), acquiring.run, "acquiring").await?;
     let accepted = Case::accept(&database, owner).await?;
     let young = Case::accept(&database, owner).await?;
+    touch(database.pool(), young.run).await?;
     for case in [&waiting, &acquiring, &accepted] {
         age(database.pool(), case.run).await?;
     }
     let reaper = Reaper::new(database.pool().clone(), DEADLINE);
 
-    assert_eq!(reaper.reap_once(jiff::Timestamp::now()).await?, 3);
+    assert_eq!(reaper.reap_once(clock()?).await?, 3);
 
     for case in [&waiting, &acquiring, &accepted] {
         assert_eq!(
@@ -75,7 +78,7 @@ async fn overdue_on_demand_runs_fail_once_each_with_a_retryable_report() -> Test
     );
 
     assert_eq!(
-        reaper.reap_once(jiff::Timestamp::now()).await?,
+        reaper.reap_once(clock()?).await?,
         0,
         "a terminal run is never reaped again"
     );
@@ -89,12 +92,13 @@ async fn the_injected_clock_decides_what_is_overdue() -> TestResult {
     let database = fresh_database().await?;
     let owner = Uuid::now_v7();
     let case = Case::accept(&database, owner).await?;
+    touch(database.pool(), case.run).await?;
     let reaper = Reaper::new(database.pool().clone(), DEADLINE);
 
-    assert_eq!(reaper.reap_once(jiff::Timestamp::now()).await?, 0);
+    assert_eq!(reaper.reap_once(clock()?).await?, 0);
     assert_eq!(run_state(database.pool(), case.run).await?.0, "accepted");
 
-    let later = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(1_801);
+    let later = clock()? + jiff::SignedDuration::from_secs(1_801);
     assert_eq!(reaper.reap_once(later).await?, 1);
     assert_eq!(run_state(database.pool(), case.run).await?.0, "failed");
     database.close().await;
@@ -131,7 +135,7 @@ async fn a_scheduled_run_fails_without_a_report() -> TestResult {
     age(database.pool(), run.0).await?;
 
     let reaped = Reaper::new(database.pool().clone(), DEADLINE)
-        .reap_once(jiff::Timestamp::now())
+        .reap_once(clock()?)
         .await?;
 
     assert_eq!(reaped, 1);
@@ -175,7 +179,7 @@ async fn a_run_whose_failed_report_already_exists_gets_no_second_one() -> TestRe
     age(database.pool(), case.run).await?;
 
     let reaped = Reaper::new(database.pool().clone(), DEADLINE)
-        .reap_once(jiff::Timestamp::now())
+        .reap_once(clock()?)
         .await?;
 
     assert_eq!(reaped, 1);
@@ -204,7 +208,7 @@ async fn a_late_knowledge_fact_for_a_reaped_run_changes_nothing() -> TestResult 
     let digest = manifest_digest(database.pool(), case.run).await?;
     age(database.pool(), case.run).await?;
     let reaped = Reaper::new(database.pool().clone(), DEADLINE)
-        .reap_once(jiff::Timestamp::now())
+        .reap_once(clock()?)
         .await?;
     assert_eq!(reaped, 1);
     let coordinator = DigestCoordinator::new(database.pool().clone());
@@ -328,12 +332,28 @@ async fn execute_with_posts(database: &Database, count: i64) -> TestResult {
     Ok(())
 }
 
+fn clock() -> Result<jiff::Timestamp, jiff::Error> {
+    CLOCK.parse()
+}
+
 async fn age(pool: &sqlx::PgPool, run: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "update channel_digests.digest_runs set updated_at = now() - make_interval(secs => $2) where run_id = $1",
+        "update channel_digests.digest_runs set updated_at = $3::timestamptz - make_interval(secs => $2) where run_id = $1",
     )
     .bind(run)
     .bind(OVERDUE_SECONDS)
+    .bind(CLOCK)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn touch(pool: &sqlx::PgPool, run: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update channel_digests.digest_runs set updated_at = $2::timestamptz where run_id = $1",
+    )
+    .bind(run)
+    .bind(CLOCK)
     .execute(pool)
     .await?;
     Ok(())
