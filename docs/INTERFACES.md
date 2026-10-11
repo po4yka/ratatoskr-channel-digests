@@ -109,10 +109,10 @@ reports, once per operation and status (outbox semantic key `operation:<id>:<sta
 | run past its deadline | `failed` | `deadline` | `channel_digest.run_deadline_exceeded`, retryable, same transaction as the run's `failed` state |
 | 21st active subscription | `failed` | `rejected` | `channel_digest.subscription_limit_reached`, not retryable; the inbox row is failed and the message is acknowledged |
 | on-demand run accepted | `running` | `acquiring` | |
-| run selects no source | `succeeded` | `no_sources` | no results, same transaction as the run's `completed` state |
-| Knowledge completion | `succeeded` or `partially_succeeded` | `completed` | one `channel_digest.result` reference; omitted sources add the warning `channel_digest.context_omitted` |
+| run selects no source and acquisition was complete | `succeeded` | `no_sources` | no results, same transaction as the run's `completed` state |
+| Knowledge completion | `succeeded` or `partially_succeeded` | `completed` | one `channel_digest.result` reference; omitted sources add the warning `channel_digest.context_omitted` and an incomplete acquisition adds `channel_digest.acquisition_incomplete`, either one making the status `partially_succeeded` |
 | Knowledge failure | `failed` | `recap` | `channel_digest.recap.<safe_failure_class>`, retryable for `provider_unavailable`, `provider_timeout`, `manifest_unavailable` |
-| every channel unavailable | `failed` | `acquiring` | `channel_digest.provider_unavailable`, retryable, same transaction as the run's `failed` state |
+| every channel unavailable, or no source after an incomplete acquisition | `failed` | `acquiring` | `channel_digest.provider_unavailable`, retryable, same transaction as the run's `failed` state |
 | manifest bound or validity | `failed` | `manifest` | `channel_digest.manifest_invalid`, not retryable, same transaction as the run's `failed` state |
 | schedule occurrence fanned out | `succeeded` | `fanned_out` | on the occurrence operation, which the fanned-out runs reuse for correlation |
 

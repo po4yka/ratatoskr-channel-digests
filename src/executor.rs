@@ -50,8 +50,13 @@ type SourceRow = (
 
 /// Outcome of acquiring every subscribed channel for one run.
 enum Acquired {
-    Ready,
+    /// Every subscribed channel was read to the end of the window.
+    Complete,
+    /// The run can proceed, but at least one channel was unavailable or only partly read.
+    Incomplete,
+    /// A provider wait defers the whole tick.
     Deferred,
+    /// Not one subscribed channel could be read.
     Unavailable,
 }
 
@@ -76,7 +81,7 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         }
         let subscriptions = self.subscribed_channels(run.owner_id).await?;
         let coordinator = DigestCoordinator::new(self.pool.clone());
-        match self.acquire(&run, &subscriptions).await {
+        let incomplete = match self.acquire(&run, &subscriptions).await {
             Acquired::Deferred => return Ok(true),
             Acquired::Unavailable => {
                 coordinator
@@ -85,10 +90,12 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                     .map_err(|_| RunExecutionError)?;
                 return Ok(true);
             }
-            Acquired::Ready => {}
-        }
+            Acquired::Complete => false,
+            Acquired::Incomplete => true,
+        };
+        self.record_acquisition(run.run_id, incomplete).await?;
         let sources = self.select_sources(&run).await?;
-        self.commit(&coordinator, &run, &sources).await?;
+        self.commit(&coordinator, &run, &sources, incomplete).await?;
         Ok(true)
     }
 
@@ -155,6 +162,10 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         .map_err(|_| RunExecutionError)
     }
 
+    /// Acquires every subscribed channel and says whether the window was read completely.
+    ///
+    /// A channel that was unavailable, or that stopped part way through its pages, makes the
+    /// acquisition incomplete: its missing posts must never read as an empty channel.
     async fn acquire(&self, run: &PendingRun, subscriptions: &[(Uuid, String)]) -> Acquired {
         let engine = AcquisitionEngine::new(
             &self.provider,
@@ -163,6 +174,7 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         );
         let mut successful_channels = 0_usize;
         let mut deferred_channels = 0_usize;
+        let mut incomplete = false;
         for (channel_id, username) in subscriptions {
             let outcome = engine
                 .execute(&AcquisitionRequest {
@@ -176,18 +188,43 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                 })
                 .await;
             match outcome {
-                Ok(_) => successful_channels += 1,
+                Ok(report) => {
+                    successful_channels += 1;
+                    incomplete |= report.partial;
+                }
                 Err(AcquisitionError::Deferred) => deferred_channels += 1,
-                Err(AcquisitionError::Unavailable) => {}
+                Err(AcquisitionError::Unavailable) => incomplete = true,
             }
         }
         if deferred_channels > 0 {
             Acquired::Deferred
         } else if !subscriptions.is_empty() && successful_channels == 0 {
             Acquired::Unavailable
+        } else if incomplete {
+            Acquired::Incomplete
         } else {
-            Acquired::Ready
+            Acquired::Complete
         }
+    }
+
+    /// Stores whether this run's acquisition was incomplete, before anything settles on it.
+    ///
+    /// The value is overwritten, not accumulated: the tick that finally proceeds decides, and the
+    /// later Knowledge fact reads it from the run row, so a restart in between loses nothing.
+    async fn record_acquisition(
+        &self,
+        run_id: Uuid,
+        incomplete: bool,
+    ) -> Result<(), RunExecutionError> {
+        sqlx::query(
+            "update channel_digests.digest_runs set acquisition_incomplete = $2 where run_id = $1",
+        )
+        .bind(run_id)
+        .bind(incomplete)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| RunExecutionError)?;
+        Ok(())
     }
 
     /// Selects the latest body of every message in the window, numbering all its revisions.
@@ -262,17 +299,27 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
     }
 
     /// Completes an empty selection, fails an unbuildable one, or commits the manifest.
+    ///
+    /// An empty selection after an incomplete acquisition is not an empty window: the run fails
+    /// as unavailable instead of completing.
     async fn commit(
         &self,
         coordinator: &DigestCoordinator,
         run: &PendingRun,
         sources: &[ManifestSource],
+        incomplete: bool,
     ) -> Result<(), RunExecutionError> {
         if sources.is_empty() {
-            return coordinator
-                .complete_empty_run(run.run_id, run.owner_id)
-                .await
-                .map_err(|_| RunExecutionError);
+            let settled = if incomplete {
+                coordinator
+                    .fail_run(run.run_id, run.owner_id, RunFailure::ProviderUnavailable)
+                    .await
+            } else {
+                coordinator
+                    .complete_empty_run(run.run_id, run.owner_id)
+                    .await
+            };
+            return settled.map_err(|_| RunExecutionError);
         }
         let built = ManifestBuilder::build(
             Uuid::now_v7(),

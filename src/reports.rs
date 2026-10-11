@@ -153,18 +153,21 @@ pub(crate) async fn on_demand_operation(
 }
 
 /// Queues the terminal report of a settled Knowledge completion, when the run is owned.
+///
+/// The report is partial when sources were omitted from the recap context or when the
+/// acquisition left a channel unread, and it carries the warning of each cause.
 pub(crate) async fn report_completion(
     connection: &mut PgConnection,
     run: (Uuid, Uuid),
     event_id: Uuid,
     result_ref: &str,
-    omitted_count: u16,
+    (omitted_count, acquisition_incomplete): (u16, bool),
 ) -> Result<(), ReportError> {
     let (run_id, owner_id) = run;
     let Some(operation) = on_demand_operation(connection, run_id, owner_id).await? else {
         return Ok(());
     };
-    let status = if omitted_count == 0 {
+    let status = if omitted_count == 0 && !acquisition_incomplete {
         OperationStatus::Succeeded
     } else {
         OperationStatus::PartiallySucceeded
@@ -176,6 +179,12 @@ pub(crate) async fn report_completion(
         row = row.with_warning(
             "channel_digest.context_omitted",
             "Some selected posts did not fit the recap context and were left out.",
+        )?;
+    }
+    if acquisition_incomplete {
+        row = row.with_warning(
+            "channel_digest.acquisition_incomplete",
+            "Some channels could not be read completely in this window.",
         )?;
     }
     row.enqueue(connection).await

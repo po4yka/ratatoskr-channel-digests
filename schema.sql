@@ -147,6 +147,7 @@ create table if not exists channel_digests.digest_runs (
         'accepted', 'acquiring', 'waiting_recap', 'completed', 'partial', 'failed'
     )),
     safe_failure_class text,
+    acquisition_incomplete boolean not null default false,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     check (window_start < window_end),

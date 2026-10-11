@@ -306,7 +306,16 @@ impl DigestCoordinator {
             .and_then(|value| Uuid::parse_str(value).ok())
             .ok_or(CoordinatorError::Invalid)?;
         let result_digest_hex = fact.result_digest.hex.as_str();
-        let outcome = if fact.coverage.omitted_count == 0 {
+        let incomplete = sqlx::query_scalar::<_, bool>(
+            "select acquisition_incomplete from channel_digests.digest_runs where run_id = $1 and owner_id = $2",
+        )
+        .bind(run_id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?
+        .unwrap_or(false);
+        let outcome = if fact.coverage.omitted_count == 0 && !incomplete {
             "completed"
         } else {
             "partial"
@@ -408,7 +417,7 @@ impl DigestCoordinator {
             (run_id, owner_id),
             message_id,
             fact.result_ref.as_str(),
-            fact.coverage.omitted_count,
+            (fact.coverage.omitted_count, incomplete),
         )
         .await?;
         sqlx::query(

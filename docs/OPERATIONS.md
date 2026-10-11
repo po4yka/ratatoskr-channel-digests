@@ -77,6 +77,15 @@ registers again, and returning to an earlier configuration registers it again. P
 `(service_name, name)` and the producer must be an allowlisted registrar
 (`ALLOWED_REGISTRARS` includes `ratatoskr-channel-digests`).
 
+## Incomplete acquisition
+
+The worker acquires every subscribed channel of a run. A channel that was unavailable, or that stopped part way through its pages (a provider failure after the first page, or the page limit), makes the acquisition incomplete and sets `digest_runs.acquisition_incomplete`. An incomplete acquisition is never reported as an empty or complete window:
+
+- with no selected source the run fails with `provider_unavailable` and the retryable report `channel_digest.provider_unavailable`; there is no `succeeded` report with stage `no_sources`;
+- with selected sources the run proceeds, the recap request is the same, and the Knowledge completion settles the result as `partial`. An on-demand run reports `partially_succeeded` with the warning `channel_digest.acquisition_incomplete`, in addition to `channel_digest.context_omitted` when sources were also omitted. A scheduled run reports nothing and settles `partial`.
+
+Find the affected runs with `select run_id,state from channel_digests.digest_runs where acquisition_incomplete`.
+
 ## Run deadline
 
 `RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS` (`60..=86400`, default 1800) bounds how long a run may stay
