@@ -342,3 +342,35 @@ fn schedule_keys_are_worker_only_strict_and_default_when_an_owner_is_set()
     );
     Ok(())
 }
+
+#[test]
+fn run_deadline_is_finite() -> Result<(), Box<dyn std::error::Error>> {
+    const DEADLINE: &str = "RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS";
+
+    let default = Config::from_environment(Role::Worker, worker_entries())?;
+    assert_eq!(default.limits.run_deadline_seconds, 1_800);
+
+    for (value, expected) in [("60", 60), ("3600", 3_600), ("86400", 86_400)] {
+        let worker = Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain([(DEADLINE, value)]),
+        )?;
+        assert_eq!(worker.limits.run_deadline_seconds, expected, "{value}");
+    }
+
+    for value in ["59", "86401", "0", "-1", "soon-LEAKME", ""] {
+        let error = Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain([(DEADLINE, value)]),
+        )
+        .expect_err("a deadline outside 60..=86400 must fail");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(DEADLINE), "{diagnostic}");
+        assert!(
+            diagnostic.contains("is outside the finite range"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("LEAKME"));
+    }
+    Ok(())
+}

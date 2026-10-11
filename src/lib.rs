@@ -15,6 +15,7 @@ mod intake;
 mod maintenance;
 mod manifest;
 mod provider;
+mod reaper;
 mod registration;
 mod reports;
 mod result_reader;
@@ -41,6 +42,7 @@ pub use provider::{
     MtProtoPublicChannelProvider, ProviderError, ProviderPage, ProviderPost, PublicChannelProvider,
     PublicChannelUsername, ResolvedPublicChannel,
 };
+pub use reaper::{Reaper, ReaperError};
 pub use registration::{RegistrationError, RegistrationOutcome, enqueue_schedule_registration};
 pub use result_reader::{
     KnowledgeResultProjection, KnowledgeResultReadError, KnowledgeResultReader,

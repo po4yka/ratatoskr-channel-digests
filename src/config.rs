@@ -82,6 +82,8 @@ pub struct Limits {
     pub retry_attempts: u32,
     /// Graceful shutdown bound.
     pub shutdown_timeout_ms: u64,
+    /// Seconds a run may stay non-terminal before the reaper fails it.
+    pub run_deadline_seconds: u64,
 }
 
 /// Worker-only `MTProto` identity and session paths.
@@ -284,6 +286,7 @@ impl Builder {
                 source_bytes: 16_384,
                 retry_attempts: 3,
                 shutdown_timeout_ms: 120_000,
+                run_deadline_seconds: 1_800,
             },
         }
     }
@@ -370,6 +373,9 @@ impl Builder {
             }
             "RATATOSKR__LIMITS__RETRY_ATTEMPTS" => {
                 self.limits.retry_attempts = parse_range(key, value, &1, &10)?;
+            }
+            "RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS" => {
+                self.limits.run_deadline_seconds = parse_range(key, value, &60, &86_400)?;
             }
             "RATATOSKR__LIMITS__SHUTDOWN_TIMEOUT_MS" => {
                 self.limits.shutdown_timeout_ms = parse_range(key, value, &1, &130_000)?;

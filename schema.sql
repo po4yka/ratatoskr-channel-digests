@@ -154,6 +154,9 @@ create table if not exists channel_digests.digest_runs (
 );
 create index if not exists digest_runs_owner_created_idx
     on channel_digests.digest_runs (owner_id, created_at desc, run_id);
+create index if not exists digest_runs_open_idx
+    on channel_digests.digest_runs (updated_at)
+    where state in ('accepted', 'acquiring', 'waiting_recap');
 
 create or replace function channel_digests.normalized_window(
     scheduled boolean,

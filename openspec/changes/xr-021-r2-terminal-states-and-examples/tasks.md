@@ -1,7 +1,7 @@
 ## 1. Run deadline reaper (R2-05 a)
 
-- [ ] 1.1 RED: add `tests/config.rs::run_deadline_is_finite` and `tests/run_deadline.rs` covering an overdue run in each of `accepted`, `acquiring` and `waiting_recap`, a younger run, a scheduled run, a second reaper pass, an existing failed report, and a late Knowledge completion and failure; add a signature-only `Reaper` that reaps nothing; run them and confirm each fails on its stated state or count.
-- [ ] 1.2 GREEN: add `RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS`, implement `Reaper::reap_once` and spawn it from `run_worker` every 30 seconds.
+- [x] 1.1 RED: add `tests/config.rs::run_deadline_is_finite` and `tests/run_deadline.rs` covering an overdue run in each of `accepted`, `acquiring` and `waiting_recap`, a younger run, a scheduled run, a second reaper pass, an existing failed report, and a late Knowledge completion and failure; add a signature-only `Reaper` that reaps nothing; run them and confirm each fails on its stated state or count.
+- [x] 1.2 GREEN: add `RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS`, implement `Reaper::reap_once`, add the partial index `digest_runs_open_idx` to `schema.sql` and spawn the reaper from `run_worker` every 30 seconds.
 
 ## 2. Attributable rejects (R2-05 b)
 

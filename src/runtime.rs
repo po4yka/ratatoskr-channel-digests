@@ -185,16 +185,48 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
         .await;
         Ok::<(), RuntimeError>(())
     });
+    let reaper = tokio::spawn(supervise_reaper(
+        crate::Reaper::new(
+            database.pool().clone(),
+            Duration::from_secs(config.limits.run_deadline_seconds),
+        ),
+        drain_tx.subscribe(),
+    ));
     shutdown_signal().await?;
     lifecycle.begin_drain();
     let _sent = drain_tx.send(true);
     join_servers(
-        [server, worker, provider],
+        [server, worker, provider, reaper],
         Duration::from_millis(config.limits.shutdown_timeout_ms),
     )
     .await?;
     database.close().await;
     Ok(())
+}
+
+/// How often the reaper looks for runs past their deadline.
+const REAP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Fails overdue runs on its own task, so it keeps working while the provider or bus is down.
+///
+/// It never touches readiness and logs only the count of failed runs and the class.
+async fn supervise_reaper(
+    reaper: crate::Reaper,
+    mut drain: watch::Receiver<bool>,
+) -> Result<(), RuntimeError> {
+    let mut tick = tokio::time::interval(REAP_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            _ = drain.changed() => return Ok(()),
+            _ = tick.tick() => match reaper.reap_once(jiff::Timestamp::now()).await {
+                Ok(0) => {}
+                Ok(count) => tracing::warn!(count, class = "deadline_exceeded", "failed overdue digest runs"),
+                Err(_) => tracing::warn!(class = "run_reaper_unavailable"),
+            },
+        }
+    }
 }
 
 async fn supervise_provider(
