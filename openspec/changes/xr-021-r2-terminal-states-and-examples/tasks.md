@@ -10,8 +10,8 @@
 
 ## 3. Page size clamp (R2-05 e)
 
-- [ ] 3.1 RED: add `services/api/tests/api.rs::a_page_size_above_the_configured_limit_is_clamped_not_refused`; run it and confirm it fails with 400 instead of 200.
-- [ ] 3.2 GREEN: clamp in `checked_page_size` and update `docs/INTERFACES.md`.
+- [x] 3.1 RED: add `services/api/tests/api.rs::a_page_size_above_the_configured_limit_is_clamped_not_refused`; run it and confirm it fails with 400 instead of 200.
+- [x] 3.2 GREEN: clamp in `checked_page_size` and update `docs/INTERFACES.md`.
 
 ## 4. Scheduled output language (R2-05 f)
 

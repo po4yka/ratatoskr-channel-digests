@@ -132,11 +132,17 @@ async fn ready(State(state): State<ApiState>) -> StatusCode {
     }
 }
 
+/// Largest page size a caller may ask for, fixed by the public contract.
+const MAX_REQUESTED_PAGE_SIZE: usize = 100;
+
+/// A valid request is clamped to the configured ceiling instead of refused, so a lower
+/// `RATATOSKR__LIMITS__PAGE_SIZE` cannot turn Platform's valid request into a client error.
 fn checked_page_size(state: &ApiState, page: &PageQuery) -> Result<i64, StatusCode> {
-    if page.page_size == 0 || page.page_size > state.page_limit {
+    if page.page_size == 0 || page.page_size > MAX_REQUESTED_PAGE_SIZE {
         return Err(StatusCode::BAD_REQUEST);
     }
-    Ok(i64::try_from(page.page_size).unwrap_or(i64::MAX))
+    let clamped = page.page_size.min(state.page_limit);
+    Ok(i64::try_from(clamped).unwrap_or(i64::MAX))
 }
 
 async fn list_subscriptions(

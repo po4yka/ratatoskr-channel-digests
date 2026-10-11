@@ -5,11 +5,13 @@ mod support;
 
 use common::{
     ChildGuard, KNOWLEDGE_AUTHORIZATION, KNOWLEDGE_SECRET, RECAP_SENTINEL, SERVICE_SECRET,
-    SeededResult, SeededResults, assert_no_recap_storage, assert_no_store, database_url, json_body,
-    request, reserve, response_body, seed_results, status, stop, wait_live,
+    SeededResult, SeededResults, TestResult, assert_no_recap_storage, assert_no_store,
+    connect_database, database_url, insert_seed, json_body, request, reserve, response_body,
+    seed_results, start_api_with, status, stop, successful_seed, wait_live,
 };
-use ratatoskr_channel_digests::Database;
+use ratatoskr_channel_digests::{Database, SubscriptionRepository};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -402,5 +404,101 @@ fn assert_knowledge_request(
             .to_ascii_lowercase()
             .contains("x-ratatoskr-owner-id")
     );
+    Ok(())
+}
+
+#[test]
+fn a_page_size_above_the_configured_limit_is_clamped_not_refused() -> TestResult {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let database = connect_database(&runtime)?;
+    let owner = Uuid::now_v7();
+    let owner_text = owner.to_string();
+    let subscriptions = SubscriptionRepository::new(database.pool().clone());
+    for index in 0..30 {
+        runtime.block_on(insert_seed(
+            database.pool(),
+            &successful_seed(owner, "completed", "11", 1, "clamp recap"),
+        ))?;
+        runtime.block_on(subscriptions.set(
+            owner,
+            &format!("clamp_channel_{index:02}"),
+            false,
+            "2026-08-27T09:00:00Z",
+        ))?;
+    }
+    let count = |api: &common::RunningApi,
+                 kind: &str,
+                 query: &str|
+     -> Result<(u16, Option<usize>), Box<dyn std::error::Error>> {
+        let response = request(
+            api.domain,
+            &format!("/v1/{kind}{query}"),
+            Some(SERVICE_SECRET),
+            Some(&owner_text),
+        )?;
+        let code = status(&response)?;
+        if code != 200 {
+            return Ok((code, None));
+        }
+        Ok((code, json_body(&response)?[kind].as_array().map(Vec::len)))
+    };
+
+    let capped = start_api_with(HashMap::new(), &[("RATATOSKR__LIMITS__PAGE_SIZE", "25")])?;
+    for kind in ["subscriptions", "results"] {
+        assert_eq!(
+            count(&capped, kind, "?page_size=100")?,
+            (200, Some(25)),
+            "{kind}"
+        );
+        assert_eq!(
+            count(&capped, kind, "?page_size=25")?,
+            (200, Some(25)),
+            "{kind}"
+        );
+        assert_eq!(
+            count(&capped, kind, "?page_size=10")?,
+            (200, Some(10)),
+            "{kind}"
+        );
+        assert_eq!(
+            count(&capped, kind, "")?,
+            (200, Some(25)),
+            "{kind}: default is clamped too"
+        );
+        for refused in [
+            "?page_size=0",
+            "?page_size=101",
+            "?page_size=many",
+            "?page_size=-1",
+        ] {
+            assert_eq!(
+                count(&capped, kind, refused)?,
+                (400, None),
+                "{kind}{refused}"
+            );
+        }
+    }
+    drop(capped);
+
+    let default = start_api_with(HashMap::new(), &[])?;
+    for kind in ["subscriptions", "results"] {
+        assert_eq!(
+            count(&default, kind, "")?,
+            (200, Some(30)),
+            "{kind}: default page is 50"
+        );
+        assert_eq!(
+            count(&default, kind, "?page_size=100")?,
+            (200, Some(30)),
+            "{kind}"
+        );
+        assert_eq!(
+            count(&default, kind, "?page_size=0")?,
+            (400, None),
+            "{kind}"
+        );
+    }
+    drop(default);
+    runtime.block_on(database.close());
     Ok(())
 }

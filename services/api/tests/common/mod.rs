@@ -35,6 +35,14 @@ pub(crate) struct RunningApi {
 pub(crate) fn start_api(
     responses: HashMap<String, String>,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
+    start_api_with(responses, &[])
+}
+
+/// Starts the API process with additional environment, for example a lower page ceiling.
+pub(crate) fn start_api_with(
+    responses: HashMap<String, String>,
+    extra_environment: &[(&str, &str)],
+) -> Result<RunningApi, Box<dyn std::error::Error>> {
     let knowledge = RecordingKnowledge::start(responses, KNOWLEDGE_AUTHORIZATION)?;
     let domain = reserve()?;
     let operator = reserve()?;
@@ -52,6 +60,7 @@ pub(crate) fn start_api(
             .env("RATATOSKR__KNOWLEDGE__MAX_RESPONSE_BYTES", "65536")
             .env("RATATOSKR__API__LISTEN_ADDRESS", domain.to_string())
             .env("RATATOSKR__OPERATOR__LISTEN_ADDRESS", operator.to_string())
+            .envs(extra_environment.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
