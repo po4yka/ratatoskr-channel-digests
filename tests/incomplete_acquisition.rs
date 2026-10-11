@@ -52,9 +52,9 @@ async fn one_unavailable_channel_and_no_posts_fails_the_run_instead_of_completin
         "an incomplete empty window is not a success"
     );
     assert!(
-        reports.iter().all(|report| {
-            report.get("stage").and_then(Value::as_str) != Some("no_sources")
-        }),
+        reports
+            .iter()
+            .all(|report| { report.get("stage").and_then(Value::as_str) != Some("no_sources") }),
         "no no_sources report may exist"
     );
     let error = typed(&reports, reports.len() - 1)?
@@ -116,7 +116,10 @@ async fn an_incomplete_acquisition_with_sources_settles_partially_succeeded() ->
     let reports = raw_reports(database.pool(), operation).await?;
     assert_eq!(terminal_statuses(&reports), ["partially_succeeded"]);
     let report = typed(&reports, reports.len() - 1)?;
-    assert_eq!(warning_codes(&report), ["channel_digest.acquisition_incomplete"]);
+    assert_eq!(
+        warning_codes(&report),
+        ["channel_digest.acquisition_incomplete"]
+    );
     assert_eq!(report.results.len(), 1);
     database.close().await;
     Ok(())
@@ -131,7 +134,15 @@ async fn an_incomplete_acquisition_with_omitted_sources_carries_both_warnings() 
     let run_id = accept_run(&database, owner, operation).await?;
     execute_midway(&database, "incomplete_both", 2).await?;
 
-    settle(&database, owner, operation, run_id, Uuid::now_v7(), (2, 1, 1)).await?;
+    settle(
+        &database,
+        owner,
+        operation,
+        run_id,
+        Uuid::now_v7(),
+        (2, 1, 1),
+    )
+    .await?;
 
     let reports = raw_reports(database.pool(), operation).await?;
     assert_eq!(terminal_statuses(&reports), ["partially_succeeded"]);
@@ -167,7 +178,15 @@ async fn a_complete_acquisition_still_settles_succeeded() -> TestResult {
     );
     assert!(!incomplete_flag(database.pool(), run_id).await?);
 
-    settle(&database, owner, operation, run_id, Uuid::now_v7(), (1, 1, 0)).await?;
+    settle(
+        &database,
+        owner,
+        operation,
+        run_id,
+        Uuid::now_v7(),
+        (1, 1, 0),
+    )
+    .await?;
 
     assert_eq!(result_outcome(database.pool(), run_id).await?, "completed");
     assert_eq!(run_state(database.pool(), run_id).await?.0, "completed");
