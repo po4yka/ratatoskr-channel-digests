@@ -157,7 +157,8 @@ fn word_after<'a>(text: &'a str, marker: &str) -> Result<&'a str, Box<dyn std::e
     let end = rest
         .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .unwrap_or(rest.len());
-    Ok(&rest[..end])
+    rest.get(..end)
+        .ok_or_else(|| "the role file ends inside a word".into())
 }
 
 #[test]

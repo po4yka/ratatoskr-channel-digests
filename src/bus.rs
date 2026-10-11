@@ -287,7 +287,7 @@ const ACK_WAIT: Duration = Duration::from_secs(30);
 /// Inbox prefix of the worker connection (XR-021 CONTRACTS.md R3-01).
 ///
 /// The deployed ACL lets this identity subscribe to exactly `_INBOX_channel_digests.>`, so a
-/// JetStream reply or a fetched message can never be read by another service on the shared
+/// `JetStream` reply or a fetched message can never be read by another service on the shared
 /// `_INBOX` namespace, and this service cannot read theirs.
 const INBOX_PREFIX: &str = "_INBOX_channel_digests";
 
