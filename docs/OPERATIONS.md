@@ -42,6 +42,15 @@ curl --silent --output /dev/null --write-out '%{http_code}\n' --max-time 2 \
 Do not use a real analysis UUID for this probe and do not pass the secret with shell tracing enabled.
 Remove the old Knowledge credential only after an authorized Channel Digests result read succeeds.
 
+## Logging
+
+Both processes install a log subscriber first thing after the configuration loads, so the warnings described in this guide reach the operator (`journalctl -u` under systemd). Events go to standard output. Both roles accept, and `check-config` validates:
+
+- `RATATOSKR__TELEMETRY__LOG_FORMAT` - `json` (the default, one JSON object per line) or `pretty`;
+- `RATATOSKR__TELEMETRY__LOG_FILTER` - a `tracing_subscriber::EnvFilter` directive string, default `info,hyper=warn,h2=warn,sqlx=warn`. A value that does not parse is refused at load with the key named and the value not echoed.
+
+Events carry safe classes and counts only (`provider_unavailable`, `bus_unavailable`, `deadline_exceeded`, `run_execution_unavailable`, `schedule_owner_absent`); no post body, channel name, token or session byte is a field. A worker whose Telegram session cannot connect logs, once a second, a WARN event with `"class":"provider_unavailable"` and the safe `error` text of the provider failure (for example `provider reauthorization required`); filter on the `class` field rather than the text.
+
 ## Bus credential
 
 The broker authenticates this service by nkey. Generate the CHANNEL_DIGESTS seed as

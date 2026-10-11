@@ -15,6 +15,9 @@ const DEFAULT_SCHEDULE_CRON: &str = "0 6 * * *";
 /// Language of scheduled digests when `RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE` is not set.
 pub(crate) const DEFAULT_SCHEDULE_LANGUAGE: OutputLanguage = OutputLanguage::Ru;
 
+/// Directive string applied when `RATATOSKR__TELEMETRY__LOG_FILTER` is not set.
+const DEFAULT_LOG_FILTER: &str = "info,hyper=warn,h2=warn,sqlx=warn";
+
 /// Executable role selected before configuration is decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -122,6 +125,34 @@ pub struct BusConfig {
     pub nkey_seed_path: Option<PathBuf>,
 }
 
+/// How a log line is rendered (`RATATOSKR__TELEMETRY__LOG_FORMAT`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogFormat {
+    /// One JSON object per line, the default, because log collectors parse it.
+    #[default]
+    Json,
+    /// Human-readable multi-line events for a developer terminal.
+    Pretty,
+}
+
+/// Process logging policy, accepted by both roles (XR-021 CONTRACTS.md R3-10 rule 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryConfig {
+    /// Rendering of every log line.
+    pub log_format: LogFormat,
+    /// A `tracing_subscriber::EnvFilter` directive string, validated when the configuration loads.
+    pub log_filter: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            log_format: LogFormat::default(),
+            log_filter: DEFAULT_LOG_FILTER.to_owned(),
+        }
+    }
+}
+
 /// The daily digest schedule this service registers with Platform at worker start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleConfig {
@@ -170,6 +201,8 @@ pub struct Config {
     pub operator: ListenerConfig,
     /// Shared finite limits.
     pub limits: Limits,
+    /// Process logging, the same for both roles.
+    pub telemetry: TelemetryConfig,
     /// Present only for the worker role.
     pub provider: Option<ProviderConfig>,
     /// Present only for the worker role.
@@ -258,6 +291,7 @@ struct Builder {
     api_listen_address: SocketAddr,
     operator_listen_address: SocketAddr,
     limits: Limits,
+    telemetry: TelemetryConfig,
 }
 
 impl Builder {
@@ -296,6 +330,7 @@ impl Builder {
                 shutdown_timeout_ms: 120_000,
                 run_deadline_seconds: 1_800,
             },
+            telemetry: TelemetryConfig::default(),
         }
     }
 
@@ -366,6 +401,12 @@ impl Builder {
             }
             "RATATOSKR__OPERATOR__LISTEN_ADDRESS" => {
                 self.operator_listen_address = parse_loopback_address(key, value)?;
+            }
+            "RATATOSKR__TELEMETRY__LOG_FORMAT" => {
+                self.telemetry.log_format = parse_log_format(key, value)?;
+            }
+            "RATATOSKR__TELEMETRY__LOG_FILTER" => {
+                self.telemetry.log_filter = parse_log_filter(key, value)?;
             }
             "RATATOSKR__LIMITS__REQUEST_BYTES" => {
                 self.limits.request_bytes = parse_range(key, value, &1, &1_048_576)?;
@@ -469,6 +510,7 @@ impl Builder {
                 listen_address: self.operator_listen_address,
             },
             limits: self.limits,
+            telemetry: self.telemetry,
             provider,
             bus,
             schedule,
@@ -501,6 +543,20 @@ impl Builder {
             output_language: self.schedule_language.unwrap_or(DEFAULT_SCHEDULE_LANGUAGE),
         }))
     }
+}
+
+fn parse_log_format(key: &str, value: &str) -> Result<LogFormat, ConfigError> {
+    match value {
+        "json" => Ok(LogFormat::Json),
+        "pretty" => Ok(LogFormat::Pretty),
+        _ => Err(ConfigError::new(key, "must be json or pretty")),
+    }
+}
+
+fn parse_log_filter(key: &str, value: &str) -> Result<String, ConfigError> {
+    tracing_subscriber::EnvFilter::try_new(nonempty(key, value)?)
+        .map(|_| value.to_owned())
+        .map_err(|_| ConfigError::new(key, "must be a valid log filter directive string"))
 }
 
 fn parse_language(key: &str, value: &str) -> Result<OutputLanguage, ConfigError> {

@@ -40,7 +40,7 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "registry"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "json", "registry"] }
 uuid = { version = "1.24.1", features = ["serde", "v7"] }
 
 [dependencies]

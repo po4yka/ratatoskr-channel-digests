@@ -1,9 +1,10 @@
 //! Real worker-role process lifecycle behavior.
 
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
@@ -56,6 +57,97 @@ fn worker_liveness_is_separate_from_dependency_readiness_and_drains()
     stop(&mut child)?;
     let _ignored = std::fs::remove_dir_all(fixture);
     Ok(())
+}
+
+#[test]
+fn the_worker_logs_a_warning_from_library_code() -> Result<(), Box<dyn std::error::Error>> {
+    let operator = TcpListener::bind("127.0.0.1:0")?;
+    let operator_address = operator.local_addr()?;
+    let fixture = std::env::temp_dir().join(format!(
+        "channel-digest-worker-logs-{}",
+        operator_address.port()
+    ));
+    std::fs::create_dir_all(&fixture)?;
+    let session = fixture.join("session.enc");
+    let key = fixture.join("session.key");
+    let session_key = [5_u8; 32];
+    std::fs::write(&key, session_key)?;
+    let nonce = [6_u8; 24];
+    let ciphertext = XChaCha20Poly1305::new((&session_key).into())
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: b"synthetic-unreachable-provider-session",
+                aad: b"ratatoskr-channel-digests-session-v1",
+            },
+        )
+        .map_err(|_| "fixture encryption failed")?;
+    let mut encrypted = nonce.to_vec();
+    encrypted.extend_from_slice(&ciphertext);
+    std::fs::write(&session, encrypted)?;
+    std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))?;
+    drop(operator);
+
+    let mut child = configured(operator_address, &session, &key)
+        .env("RATATOSKR__TELEMETRY__LOG_FORMAT", "json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let lines = capture_stdout(&mut child)?;
+    let mut seen = Vec::new();
+    let warning = await_event(&lines, &mut seen, |event| {
+        event.pointer("/fields/class") == Some(&serde_json::json!("provider_unavailable"))
+    });
+    stop(&mut child)?;
+    let _ignored = std::fs::remove_dir_all(fixture);
+
+    let warning = warning?;
+    assert_eq!(warning.get("level"), Some(&serde_json::json!("WARN")));
+    let output = seen.join("\n");
+    for secret in [
+        "synthetic-unreachable-provider-session",
+        "synthetic-service-secret",
+        "synthetic-api-hash",
+    ] {
+        assert!(!output.contains(secret), "the log output leaked {secret}");
+    }
+    Ok(())
+}
+
+/// Forwards the child's standard output line by line, so a test never blocks on a silent process.
+fn capture_stdout(child: &mut Child) -> Result<Receiver<String>, Box<dyn std::error::Error>> {
+    let stdout = child.stdout.take().ok_or("standard output is not piped")?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(receiver)
+}
+
+/// The first JSON log line the predicate accepts, within five seconds; every line read is kept.
+fn await_event(
+    lines: &Receiver<String>,
+    seen: &mut Vec<String>,
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(remaining)
+            .map_err(|_| "no matching log line within five seconds")?;
+        seen.push(line.clone());
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line)
+            && wanted(&event)
+        {
+            return Ok(event);
+        }
+    }
 }
 
 fn configured(operator: SocketAddr, session: &std::path::Path, key: &std::path::Path) -> Command {

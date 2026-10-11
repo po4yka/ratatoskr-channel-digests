@@ -3,9 +3,10 @@
 mod support;
 
 use std::collections::HashMap;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use ratatoskr_channel_digests::Database;
@@ -104,6 +105,71 @@ fn api_and_worker_roles_are_separate_ready_and_bounded() -> Result<(), Box<dyn s
     knowledge.stop()?;
     runtime.block_on(database.close());
     Ok(())
+}
+
+#[test]
+fn the_api_logs_its_startup() -> Result<(), Box<dyn std::error::Error>> {
+    let api = TcpListener::bind("127.0.0.1:0")?;
+    let api_address = api.local_addr()?;
+    let operator = TcpListener::bind("127.0.0.1:0")?;
+    let operator_address = operator.local_addr()?;
+    drop(api);
+    drop(operator);
+
+    let mut child = configured(api_address, operator_address, "http://127.0.0.1:1")
+        .env("RATATOSKR__TELEMETRY__LOG_FORMAT", "json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let lines = capture_stdout(&mut child)?;
+    let mut seen = Vec::new();
+    let startup = await_event(&lines, &mut seen, |event| {
+        event.pointer("/fields/message") == Some(&serde_json::json!("channel digest API started"))
+    });
+    stop(&mut child)?;
+
+    let startup = startup?;
+    assert_eq!(startup.get("level"), Some(&serde_json::json!("INFO")));
+    let output = seen.join("\n");
+    for secret in [SERVICE_SECRET, KNOWLEDGE_SECRET] {
+        assert!(!output.contains(secret), "the log output leaked {secret}");
+    }
+    Ok(())
+}
+
+/// Forwards the child's standard output line by line, so a test never blocks on a silent process.
+fn capture_stdout(child: &mut Child) -> Result<Receiver<String>, Box<dyn std::error::Error>> {
+    let stdout = child.stdout.take().ok_or("standard output is not piped")?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(receiver)
+}
+
+/// The first JSON log line the predicate accepts, within five seconds; every line read is kept.
+fn await_event(
+    lines: &Receiver<String>,
+    seen: &mut Vec<String>,
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(remaining)
+            .map_err(|_| "no matching log line within five seconds")?;
+        seen.push(line.clone());
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line)
+            && wanted(&event)
+        {
+            return Ok(event);
+        }
+    }
 }
 
 fn base_configured(api: SocketAddr, operator: SocketAddr) -> Command {

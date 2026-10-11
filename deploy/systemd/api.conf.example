@@ -17,3 +17,6 @@ RATATOSKR__KNOWLEDGE__REQUEST_TIMEOUT_MS=3000
 RATATOSKR__KNOWLEDGE__MAX_RESPONSE_BYTES=65536
 # A list request above this ceiling is clamped to it, not refused. Platform asks for up to 100.
 RATATOSKR__LIMITS__PAGE_SIZE=100
+# Log lines go to standard output: json (one object per line) or pretty, and an EnvFilter directive string.
+RATATOSKR__TELEMETRY__LOG_FORMAT=json
+RATATOSKR__TELEMETRY__LOG_FILTER=info,hyper=warn,h2=warn,sqlx=warn

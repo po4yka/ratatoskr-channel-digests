@@ -431,3 +431,56 @@ fn schedule_output_language_is_strict_and_worker_only() -> Result<(), Box<dyn st
     assert!(api.to_string().contains("is not recognized for this role"));
     Ok(())
 }
+
+#[test]
+fn the_telemetry_keys_are_accepted_by_both_roles_and_validated()
+-> Result<(), Box<dyn std::error::Error>> {
+    const FORMAT: &str = "RATATOSKR__TELEMETRY__LOG_FORMAT";
+    const FILTER: &str = "RATATOSKR__TELEMETRY__LOG_FILTER";
+    let api = |extra: &[(&'static str, &'static str)]| {
+        Config::from_environment(
+            Role::Api,
+            base()
+                .into_iter()
+                .chain(reader_entries())
+                .chain(extra.iter().copied()),
+        )
+    };
+    let worker = |extra: &[(&'static str, &'static str)]| {
+        Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain(extra.iter().copied()),
+        )
+    };
+
+    for format in ["json", "pretty"] {
+        api(&[(FORMAT, format)])?;
+        worker(&[(FORMAT, format)])?;
+    }
+    for filter in ["info", "warn,ratatoskr_channel_digests=debug"] {
+        api(&[(FILTER, filter)])?;
+        worker(&[(FILTER, filter)])?;
+    }
+    api(&[])?;
+    worker(&[])?;
+
+    for (key, value) in [
+        (FORMAT, "xml-LEAKME"),
+        (FORMAT, "JSON"),
+        (FORMAT, ""),
+        (FILTER, "info,ratatoskr_channel_digests=loud-LEAKME"),
+    ] {
+        for error in [
+            api(&[(key, value)]).expect_err("a bad telemetry value must fail the API role"),
+            worker(&[(key, value)]).expect_err("a bad telemetry value must fail the worker role"),
+        ] {
+            let diagnostic = error.to_string();
+            assert!(diagnostic.contains(key), "{diagnostic}");
+            assert!(
+                !diagnostic.contains("LEAKME"),
+                "the rejected value must not be echoed: {diagnostic}"
+            );
+        }
+    }
+    Ok(())
+}

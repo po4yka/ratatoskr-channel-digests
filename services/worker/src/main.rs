@@ -2,11 +2,12 @@
 
 //! Event-driven channel acquisition and digest execution worker.
 
-use ratatoskr_channel_digests::{Config, Role, SessionMaterial, run_worker};
+use ratatoskr_channel_digests::{Config, Role, SessionMaterial, install_subscriber, run_worker};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(Role::Worker)?;
+    install_subscriber(&config)?;
     let provider = config
         .provider
         .as_ref()

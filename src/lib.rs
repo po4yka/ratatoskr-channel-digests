@@ -24,13 +24,16 @@ mod runs;
 mod runtime;
 mod session;
 mod subscriptions;
+mod telemetry;
 
 pub use acquisition::{AcquisitionEngine, AcquisitionError, AcquisitionReport, AcquisitionRequest};
 pub use bus::{
     BusError, ConsumerSet, DeliveryDisposition, WorkerMessageHandler, connect, publish_message,
     verify_consumers,
 };
-pub use config::{BusConfig, Config, ConfigError, Role, ScheduleConfig};
+pub use config::{
+    BusConfig, Config, ConfigError, LogFormat, Role, ScheduleConfig, TelemetryConfig,
+};
 pub use coordinator::{CoordinatorError, DigestCoordinator, OccurrenceRequest};
 pub use database::{Database, DatabaseError};
 pub use envelopes::{OutboundMessage, OutboxRow, wrap_outbox_row};
@@ -52,3 +55,4 @@ pub use runs::{DigestRun, RunError, RunRepository, RunState, RunTrigger};
 pub use runtime::{RuntimeError, run_api, run_worker};
 pub use session::{SessionError, SessionMaterial};
 pub use subscriptions::{Subscription, SubscriptionError, SubscriptionRepository};
+pub use telemetry::{TelemetryError, install_subscriber};

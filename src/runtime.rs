@@ -112,6 +112,11 @@ pub async fn run_api(config: Config) -> Result<(), RuntimeError> {
     let operator = tokio::net::TcpListener::bind(config.operator.listen_address)
         .await
         .map_err(|_| RuntimeError::Listener)?;
+    tracing::info!(
+        api = %config.api.listen_address,
+        operator = %config.operator.listen_address,
+        "channel digest API started"
+    );
     serve_pair(
         api,
         crate::api::router(
@@ -145,6 +150,10 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
         .await
         .map_err(|_| RuntimeError::Listener)?;
     let bus = config.bus.clone().ok_or(RuntimeError::Listener)?;
+    tracing::info!(
+        operator = %config.operator.listen_address,
+        "channel digest worker started"
+    );
     crate::registration::enqueue_schedule_registration(database.pool(), config.schedule.as_ref())
         .await
         .map_err(|_| RuntimeError::Registration)?;

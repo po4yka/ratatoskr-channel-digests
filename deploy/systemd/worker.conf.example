@@ -23,3 +23,6 @@ RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE=ru
 # A run that has not finished this many seconds after its last update is failed and its Platform
 # operation is reported as failed (60 to 86400).
 RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS=1800
+# Log lines go to standard output: json (one object per line) or pretty, and an EnvFilter directive string.
+RATATOSKR__TELEMETRY__LOG_FORMAT=json
+RATATOSKR__TELEMETRY__LOG_FILTER=info,hyper=warn,h2=warn,sqlx=warn
