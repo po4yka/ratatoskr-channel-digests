@@ -20,8 +20,8 @@
 
 ## 5. Operator examples and documentation (R2-10, R2-01)
 
-- [ ] 5.1 RED: add `tests/deployment_profile.rs::shipped_examples_load_through_the_config_loader`; run it and confirm it fails because the example files are absent.
-- [ ] 5.2 GREEN: ship the two example files. No failing behaviour test applies to the documentation edits to `docs/OPERATIONS.md`, `docs/INTERFACES.md` and `README.md`; the example test and `openspec validate` are the evidence.
+- [x] 5.1 RED: add `tests/deployment_profile.rs::shipped_examples_load_through_the_config_loader`; run it and confirm it fails because the example files are absent.
+- [x] 5.2 GREEN: ship the two example files. No failing behaviour test applies to the documentation edits to `docs/OPERATIONS.md`, `docs/INTERFACES.md` and `README.md`; the example test and `openspec validate` are the evidence.
 
 ## 6. Gate
 

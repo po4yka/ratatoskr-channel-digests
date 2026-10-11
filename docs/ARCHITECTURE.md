@@ -19,6 +19,7 @@ Both processes load configuration through `Config::load` (`src/config.rs`) with 
 - `runs.rs`, `executor.rs` — deterministic run/window state and the durable provider-to-manifest execution path, including lease-based restart safety.
 - `manifest.rs` — builds the contract `ChannelDigestManifest` from the selected revisions, renders its canonical text, and takes the SHA-256 of that exact text; the stored text is what the API serves.
 - `reports.rs` — the typed `OperationReported` builder; every report is validated and queued in the transaction of the state it reports.
+- `reaper.rs` — the run deadline reaper: fails runs that stayed non-terminal past the deadline and reports their on-demand operations in the same transaction.
 - `registration.rs` — queues the daily-digest schedule registration command at worker start.
 - `coordinator.rs` — atomic manifest-to-Knowledge exchange: builds the typed recap request and settles completion/failure against durable evidence.
 - `intake.rs` — typed transactional command intake (subscription set, run requested, schedule occurrence) with transport/semantic deduplication.

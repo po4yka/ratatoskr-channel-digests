@@ -1,0 +1,25 @@
+# /etc/ratatoskr/channel-digests-worker.conf -- root:ratatoskr-channel-digests-worker 0640
+# The only process that holds the Telegram session. It reads commands from the bus, acquires public
+# channel posts, builds manifests and settles Knowledge's recap facts.
+RATATOSKR__DATABASE__URL=postgres://ratatoskr_channel_digests:CHANGE-ME@127.0.0.1:5432/ratatoskr
+RATATOSKR__AUTH__SERVICE_SECRET=CHANGE-ME
+RATATOSKR__OPERATOR__LISTEN_ADDRESS=127.0.0.1:9470
+RATATOSKR__BUS__ENDPOINT=nats://127.0.0.1:4222
+RATATOSKR__BUS__NKEY_SEED_PATH=/etc/ratatoskr/channel-digests.nkey
+# 12345 is a syntactically valid placeholder; use the Telegram application identity the operator
+# registered.
+RATATOSKR__PROVIDER__API_ID=12345
+RATATOSKR__PROVIDER__API_HASH=CHANGE-ME
+RATATOSKR__PROVIDER__SESSION_FILE=/etc/ratatoskr/secrets/channel-digests-session.enc
+RATATOSKR__PROVIDER__SESSION_KEY_FILE=/etc/ratatoskr/secrets/channel-digests-session.key
+# The daily digest schedule this worker registers with Platform at start. CHANGE-ME: this user id
+# MUST exist and be active in identity.users, because Platform has no system principal and rejects a
+# registration whose owner is not a user. The value below is a placeholder shape, not a real user.
+RATATOSKR__SCHEDULE__OWNER_USER_ID=018f0000-0000-7000-8000-000000000042
+RATATOSKR__SCHEDULE__CRON=0 6 * * *
+RATATOSKR__SCHEDULE__ENABLED=true
+# Language of the recap of every scheduled run: ru or en.
+RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE=ru
+# A run that has not finished this many seconds after its last update is failed and its Platform
+# operation is reported as failed (60 to 86400).
+RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS=1800

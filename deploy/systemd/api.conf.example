@@ -1,0 +1,19 @@
+# /etc/ratatoskr/channel-digests-api.conf -- root:ratatoskr-channel-digests-api 0640
+# The loopback read API. It holds no Telegram credential and no bus credential.
+RATATOSKR__DATABASE__URL=postgres://ratatoskr_channel_digests:CHANGE-ME@127.0.0.1:5432/ratatoskr
+# Bearer secret of every caller. Platform's RATATOSKR__CHANNEL_DIGESTS__SERVICE_SECRET and Knowledge's
+# manifest reader send this exact value.
+RATATOSKR__AUTH__SERVICE_SECRET=CHANGE-ME
+RATATOSKR__API__LISTEN_ADDRESS=127.0.0.1:8098
+RATATOSKR__OPERATOR__LISTEN_ADDRESS=127.0.0.1:9469
+# Knowledge's domain API listener (RATATOSKR__API__LISTEN_ADDRESS in Knowledge), which serves
+# /internal/channel-digest-results/*. It is not Knowledge's operator listener on 9081.
+RATATOSKR__KNOWLEDGE__BASE_URL=http://127.0.0.1:8091
+# Knowledge's RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET. Without it Knowledge does not
+# serve the result route at all.
+RATATOSKR__KNOWLEDGE__RESULT_READER_SERVICE_SECRET=CHANGE-ME
+RATATOSKR__KNOWLEDGE__CONNECT_TIMEOUT_MS=1000
+RATATOSKR__KNOWLEDGE__REQUEST_TIMEOUT_MS=3000
+RATATOSKR__KNOWLEDGE__MAX_RESPONSE_BYTES=65536
+# A list request above this ceiling is clamped to it, not refused. Platform asks for up to 100.
+RATATOSKR__LIMITS__PAGE_SIZE=100

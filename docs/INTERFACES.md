@@ -20,6 +20,10 @@ Routes are:
 - `GET /v1/results/{result_id}`;
 - `GET /v1/manifests/{manifest_id}`.
 
+Both lists clamp `page_size` to the configured `RATATOSKR__LIMITS__PAGE_SIZE` (default 100): a valid
+request above the ceiling, and the default of 50 under a lower ceiling, return a page of at most the
+ceiling instead of a `400`. Zero, a value above 100 and a non-number remain `400`.
+
 `GET /v1/manifests/{manifest_id}` also requires the claims `X-Ratatoskr-Digest-Run-Id` (bare run
 UUID) and `X-Ratatoskr-Manifest-Digest` (64 lowercase hex). It answers `200` with
 `Content-Type: application/json` and a body that is exactly the stored canonical manifest text,
@@ -101,6 +105,8 @@ reports, once per operation and status (outbox semantic key `operation:<id>:<sta
 | Point | Status | Stage | Notes |
 | --- | --- | --- | --- |
 | subscription applied | `succeeded` | `applied` | |
+| command rejected as invalid | `failed` | `rejected` | `channel_digest.command_invalid`, not retryable; see below |
+| run past its deadline | `failed` | `deadline` | `channel_digest.run_deadline_exceeded`, retryable, same transaction as the run's `failed` state |
 | 21st active subscription | `failed` | `rejected` | `channel_digest.subscription_limit_reached`, not retryable; the inbox row is failed and the message is acknowledged |
 | on-demand run accepted | `running` | `acquiring` | |
 | run selects no source | `succeeded` | `no_sources` | no results, same transaction as the run's `completed` state |
@@ -109,6 +115,21 @@ reports, once per operation and status (outbox semantic key `operation:<id>:<sta
 | every channel unavailable | `failed` | `acquiring` | `channel_digest.provider_unavailable`, retryable, same transaction as the run's `failed` state |
 | manifest bound or validity | `failed` | `manifest` | `channel_digest.manifest_invalid`, not retryable, same transaction as the run's `failed` state |
 | schedule occurrence fanned out | `succeeded` | `fanned_out` | on the occurrence operation, which the fanned-out runs reuse for correlation |
+
+A run or subscription command that fails validation or an invariant is reported as `failed` and
+acknowledged when it is attributable: its envelope tenant is a user, its payload names an
+`operation_id`, and its payload `owner` equals that tenant. The inbox row is stored as failed with the
+safe class `command_invalid`, even when the payload does not decode into the typed command (for
+example a window longer than the contract allows). A command that cannot be attributed, or whose
+producer or command type is wrong, is terminated without a report.
+
+A run in `accepted`, `acquiring` or `waiting_recap` whose last update is older than
+`RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS` (default 1800, `60..=86400`) is failed by the worker's
+reaper, which runs every 30 seconds independently of the provider connection. The run gets the safe
+class `deadline_exceeded`. An on-demand run also queues the one `failed` report above; the outbox key
+`operation:<id>:failed` keeps an already queued report from being duplicated. A scheduled run fails
+without a report. A Knowledge completion or failure that arrives for such a run changes no state and
+queues no report.
 
 Scheduled digest runs are owned by no Platform operation and report nothing. A schedule occurrence
 takes its operation from the envelope `correlation_id` and its owner from the envelope `tenant_id`;

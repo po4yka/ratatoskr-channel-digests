@@ -11,7 +11,9 @@ visibility, production NATS topology, or deployment acceptance.
 
 Only the API role receives these settings:
 
-- `RATATOSKR__KNOWLEDGE__BASE_URL` — numeric loopback HTTP origin with a nonzero port and no path;
+- `RATATOSKR__KNOWLEDGE__BASE_URL` — numeric loopback HTTP origin with a nonzero port and no path. It
+  is Knowledge's domain API listener, `http://127.0.0.1:8091`, which serves
+  `/internal/channel-digest-results/*`; Knowledge's operator listener on 9081 does not;
 - `RATATOSKR__KNOWLEDGE__RESULT_READER_SERVICE_SECRET` — dedicated non-empty secret, at most 4096
   bytes;
 - `RATATOSKR__KNOWLEDGE__CONNECT_TIMEOUT_MS` — `1..10000`;
@@ -63,13 +65,42 @@ At start the worker queues one `platform.schedule.registration_requested.v1` com
   `schedule_owner_absent`. This user MUST exist in `identity.users`: Platform has no system
   principal, so a registration for an unknown user is rejected;
 - `RATATOSKR__SCHEDULE__CRON` - five-field UTC cron expression, default `0 6 * * *`;
-- `RATATOSKR__SCHEDULE__ENABLED` - `true` or `false`, default `true` once an owner is set.
+- `RATATOSKR__SCHEDULE__ENABLED` - `true` or `false`, default `true` once an owner is set;
+- `RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE` - `ru` or `en`, default `ru`: the recap language of every
+  run an occurrence creates. It does not change the registration sent to Platform.
 
-Setting the cron or enabled key without an owner is a configuration error. The outbox semantic key
+Setting the cron, enabled or language key without an owner is a configuration error. The outbox semantic key
 is the SHA-256 of owner, cron and enabled, so an unchanged configuration is queued once, a changed one
 registers again, and returning to an earlier configuration registers it again. Platform upserts on
 `(service_name, name)` and the producer must be an allowlisted registrar
 (`ALLOWED_REGISTRARS` includes `ratatoskr-channel-digests`).
+
+## Run deadline
+
+`RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS` (`60..=86400`, default 1800) bounds how long a run may stay
+in `accepted`, `acquiring` or `waiting_recap` after its last update. The worker's reaper checks every
+30 seconds on its own task, so it keeps working while the Telegram provider or the bus is down and it
+never changes readiness. An overdue run becomes `failed` with `deadline_exceeded` and its Platform
+operation is reported `failed` with the retryable code `channel_digest.run_deadline_exceeded`; the
+worker logs only the count and the class. A recap that arrives later is ignored. Raise the deadline
+rather than the Knowledge retry budget if recaps legitimately take longer.
+
+## Rejected commands
+
+A run or subscription command that fails validation but names its operation and owner is reported as
+a failed operation with `channel_digest.command_invalid` and acknowledged, so Platform shows the
+failure instead of waiting for its own stale reaper. Inspect them with
+`select subject,safe_failure_class from channel_digests.inbox_messages where safe_failure_class = 'command_invalid'`.
+A command that cannot be attributed is terminated and appears only as a bus redelivery counter.
+
+## Shipped examples
+
+`deploy/systemd/api.conf.example` and `deploy/systemd/worker.conf.example` list every key a flow
+needs, with `CHANGE-ME` for each secret. `tests/deployment_profile.rs` loads both through the real
+configuration loader, so they cannot drift from the keys this service accepts. Copy them to
+`/etc/ratatoskr/channel-digests-api.conf` and `/etc/ratatoskr/channel-digests-worker.conf` and replace
+the placeholders; the schedule owner in the worker file must be a user that exists in
+`identity.users`.
 
 ## Session provisioning and reauthorization
 
@@ -99,7 +130,7 @@ session, phone code, or raw provider error into logs or tickets.
 
 ## Recovery and inspection
 
-Read-only inspection of stuck runs and replay state:
+A stuck run is failed by the deadline reaper; read-only inspection of runs and replay state:
 
 ```sh
 psql "$CHANNEL_DIGEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c \
