@@ -1,7 +1,15 @@
 # /etc/ratatoskr/channel-digests-worker.conf -- root:ratatoskr-channel-digests-worker 0640
 # The only process that holds the Telegram session. It reads commands from the bus, acquires public
 # channel posts, builds manifests and settles Knowledge's recap facts.
+#
+# Start order: Edge, Knowledge, then this service.
+# PostgreSQL: the role and database below are the ones deploy/postgres/role.sql creates. Run it as an
+# administrator after Platform's 01-database-and-roles.sql, set the password with
+# `\password ratatoskr_channel_digests`, and put the same password in the URL.
 RATATOSKR__DATABASE__URL=postgres://ratatoskr_channel_digests:CHANGE-ME@127.0.0.1:5432/ratatoskr
+# The worker serves no caller; the loader requires the value and it must equal the API's, which must
+# equal Edge's RATATOSKR__CHANNEL_DIGESTS__SERVICE_SECRET and Knowledge's
+# RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET.
 RATATOSKR__AUTH__SERVICE_SECRET=CHANGE-ME
 RATATOSKR__OPERATOR__LISTEN_ADDRESS=127.0.0.1:9470
 RATATOSKR__BUS__ENDPOINT=nats://127.0.0.1:4222

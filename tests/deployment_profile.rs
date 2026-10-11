@@ -147,3 +147,63 @@ fn the_worker_example_documents_the_schedule_owner_prerequisite() -> TestResult 
     );
     Ok(())
 }
+
+/// The word that follows `marker` in `text`, ending at the first character that is not part of a
+/// SQL identifier.
+fn word_after<'a>(text: &'a str, marker: &str) -> Result<&'a str, Box<dyn std::error::Error>> {
+    let (_, rest) = text
+        .split_once(marker)
+        .ok_or_else(|| format!("the role file has no `{marker}`"))?;
+    let end = rest
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(rest.len());
+    Ok(&rest[..end])
+}
+
+#[test]
+fn the_role_file_creates_the_role_the_examples_name() -> TestResult {
+    let path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("deploy/postgres/role.sql");
+    let sql = std::fs::read_to_string(path)?;
+    let role = word_after(&sql, "create role ")?;
+    let database = word_after(&sql, "on database ")?;
+    assert_eq!(
+        word_after(&sql, "\\connect ")?,
+        database,
+        "the schema revoke runs in the database the grant names"
+    );
+    assert!(
+        sql.contains(&format!("revoke all on schema public from {role}")),
+        "the role gets no implicit access to the public schema"
+    );
+    assert!(
+        sql.contains("nosuperuser nocreatedb nocreaterole noreplication nobypassrls"),
+        "the role is unprivileged"
+    );
+    assert!(
+        !sql.to_ascii_lowercase().contains("password '"),
+        "no credential belongs in the repository"
+    );
+
+    for name in ["api.conf.example", "worker.conf.example"] {
+        let entries = example(name)?;
+        let url = value(&entries, "RATATOSKR__DATABASE__URL")
+            .ok_or_else(|| format!("{name} sets no database URL"))?;
+        let rest = url
+            .strip_prefix("postgres://")
+            .ok_or_else(|| format!("{name}: not a postgres URL"))?;
+        let (credentials, location) = rest
+            .split_once('@')
+            .ok_or_else(|| format!("{name}: no host in the URL"))?;
+        assert_eq!(
+            credentials.split(':').next(),
+            Some(role),
+            "{name}: the URL role is the one the role file creates"
+        );
+        assert_eq!(
+            location,
+            format!("127.0.0.1:5432/{database}"),
+            "{name}: the shared database on the PostgreSQL port"
+        );
+    }
+    Ok(())
+}

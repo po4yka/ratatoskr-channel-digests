@@ -7,6 +7,12 @@ process that can read the separately mounted session ciphertext and 32-byte key.
 tests prove bounds and recovery logic; they do not prove live Telegram authorization, channel
 visibility, production NATS topology, or deployment acceptance.
 
+## PostgreSQL
+
+The service shares Ratatoskr's one database, `ratatoskr`, and connects to it as its own role `ratatoskr_channel_digests` on port 5432, as both shipped examples spell it. `deploy/postgres/role.sql` creates that role without a password and without superuser, database, role, replication or row-security bypass privileges, grants it `connect` and `create` on the database, and revokes the `public` schema from it; the service creates and owns its own `channel_digests` schema from `schema.sql` at start. The order is: Platform's `01-database-and-roles.sql`, the first Edge start and `02-grants.sql`, then this file as an administrator (`psql -f deploy/postgres/role.sql`), then `\password ratatoskr_channel_digests`, then the first start of the API and the worker. The same password goes into `RATATOSKR__DATABASE__URL` of both configuration files.
+
+Start the services in this order: Edge, Knowledge, then this service. `RATATOSKR__AUTH__SERVICE_SECRET` must carry the same value as Edge's `RATATOSKR__CHANNEL_DIGESTS__SERVICE_SECRET` and Knowledge's `RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET`; a renamed key on one side leaves a flow silently refused.
+
 ## Knowledge result-reader authority
 
 Only the API role receives these settings:
