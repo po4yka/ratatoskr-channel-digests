@@ -22,7 +22,7 @@ It never stores recap narrative: successful result reads resolve the local owner
 verify both values against Knowledge before returning the recap.
 
 A run that does not finish within `RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS` (default 1800) is failed
-and its Platform operation reported, list pages are clamped to `RATATOSKR__LIMITS__PAGE_SIZE`, and
+and its Platform operation reported, a digest takes the newest `RATATOSKR__LIMITS__SOURCE_COUNT` posts of its window (default 100) and says it is partial when the window held more, a post deleted upstream is withdrawn from later digests, stored post bodies are nulled after `RATATOSKR__RETENTION__BODY_DAYS` (default 30) by a sweep every `RATATOSKR__RETENTION__SWEEP_INTERVAL_SECONDS` (default 3600), list pages are clamped to `RATATOSKR__LIMITS__PAGE_SIZE`, and
 scheduled digests use `RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE` (default `ru`). The API reads Knowledge
 results from its domain listener, `RATATOSKR__KNOWLEDGE__BASE_URL=http://127.0.0.1:8091`. Operator
 examples are in `deploy/systemd/api.conf.example` and `deploy/systemd/worker.conf.example`.

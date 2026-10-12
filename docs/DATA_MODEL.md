@@ -12,7 +12,7 @@ Every run carries the Platform `operation_id` it was accepted under (`digest_run
 a scheduled run carries the occurrence operation, so the executor selects pending runs from the run
 table alone. `digest_manifests.canonical_text` holds the exact canonical manifest text and
 `sha256` is the SHA-256 of that text; the API returns the text unchanged. A run that selects no
-source completes without a manifest row. `digest_runs.acquisition_incomplete` is true when acquisition left any subscribed channel unavailable or only partly read; the executor writes it before it selects sources, and a Knowledge completion reads it from the run row, so the result outcome is `partial` for an incomplete acquisition as well as for omitted sources. A run with no source and an incomplete acquisition fails instead of completing. `outbox_messages` holds bare typed payloads with a closed
+source completes without a manifest row. `digest_runs.acquisition_incomplete` is true when acquisition left any subscribed channel unavailable or only partly read; it is also true when the window held more eligible revisions than `RATATOSKR__LIMITS__SOURCE_COUNT`, the executor writes it after it selects sources, and a Knowledge completion reads it from the run row, so the result outcome is `partial` for an incomplete acquisition as well as for omitted sources. A run with no source and an incomplete acquisition fails instead of completing. `outbox_messages` holds bare typed payloads with a closed
 `subject` check (recap request, operation report, schedule registration); `operation_id` is null for
 a registration, which belongs to no operation, and `causation_ref` records the inbound command or
 event. The bus wraps each row into its contract envelope at publish time, using the row identity and

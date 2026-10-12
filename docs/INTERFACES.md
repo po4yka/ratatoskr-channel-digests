@@ -140,4 +140,5 @@ an occurrence missing either is terminated.
 
 Both roles expose `GET /live` and `GET /ready`. Worker readiness requires both exact JetStream
 topology and an authorized provider session; the API requires its database and listener. A drain
-turns readiness off before work is joined.
+turns readiness off before work is joined. The worker operator plane also serves `GET /metrics` in the
+Prometheus text format with one counter, `channel_digests_bodies_minimized_total`.

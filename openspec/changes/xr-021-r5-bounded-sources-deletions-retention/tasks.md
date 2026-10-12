@@ -15,7 +15,7 @@
 
 ## 4. Documentation (R5-07)
 
-- [ ] 4.1 Update `docs/ARCHITECTURE.md`, `docs/REQUIREMENTS.md`, `docs/OPERATIONS.md` and `README.md` for newest-first selection and the partial marking, withdrawal by absence and its range rule, and the retention keys. No failing test applies because this task only edits documentation.
+- [x] 4.1 Update `docs/ARCHITECTURE.md`, `docs/REQUIREMENTS.md`, `docs/OPERATIONS.md` and `README.md` for newest-first selection and the partial marking, withdrawal by absence and its range rule, and the retention keys. No failing test applies because this task only edits documentation.
 
 ## 5. Gate
 

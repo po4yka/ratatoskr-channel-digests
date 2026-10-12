@@ -99,7 +99,17 @@ The worker acquires every subscribed channel of a run, newest page first, and st
 - with no selected source the run fails with `provider_unavailable` and the retryable report `channel_digest.provider_unavailable`; there is no `succeeded` report with stage `no_sources`;
 - with selected sources the run proceeds, the recap request is the same, and the Knowledge completion settles the result as `partial`. An on-demand run reports `partially_succeeded` with the warning `channel_digest.acquisition_incomplete`, in addition to `channel_digest.context_omitted` when sources were also omitted. A scheduled run reports nothing and settles `partial`.
 
+A window that holds more posts than one digest takes sets the same flag. The digest keeps the newest `RATATOSKR__LIMITS__SOURCE_COUNT` posts (`1..=100`, default 100), never the oldest, and the worker logs a WARN with the class `digest_source_count_exceeded` and the `selected` and `eligible` counts, no content. The warning on the operation is the same `channel_digest.acquisition_incomplete`; its message names both causes, so read the worker log to tell a truncated window from an unread channel.
+
 Find the affected runs with `select run_id,state from channel_digests.digest_runs where acquisition_incomplete`.
+
+## Deleted posts
+
+A post deleted upstream is withdrawn the next time a run reads a page that proves it is gone: every stored, non-deleted revision of a message that lies in the page's id range and is not on the page gets `deleted_at`, a null body and `minimized_at`, and later digests skip it. A walk that stops at the page limit or at a provider failure withdraws only inside the pages it read, and a post without text counts as present. A recap that Knowledge already stored is not withdrawn; only later digests change. Find withdrawn messages with `select distinct channel_id,provider_message_id from channel_digests.post_revisions where deleted_at is not null`.
+
+## Body retention
+
+The worker minimizes stored post bodies on its own task, so it keeps working while the Telegram provider or the bus is down. `RATATOSKR__RETENTION__BODY_DAYS` (`8..=3650`, default 30, above the seven day window bound) sets the age after which a body is nulled, and `RATATOSKR__RETENTION__SWEEP_INTERVAL_SECONDS` (`60..=86400`, default 3600) sets the timer. Both keys are worker-only. A pass minimizes at most 5000 rows, oldest first, so a backlog drains over several ticks. The digest, publication time and revision identity stay. The worker logs only the count and the counter `channel_digests_bodies_minimized_total` is served in the Prometheus text format on `http://127.0.0.1:9470/metrics`.
 
 ## Run deadline
 
