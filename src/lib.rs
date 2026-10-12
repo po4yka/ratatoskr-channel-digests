@@ -50,7 +50,7 @@ pub use registration::{RegistrationError, RegistrationOutcome, enqueue_schedule_
 pub use result_reader::{
     KnowledgeResultProjection, KnowledgeResultReadError, KnowledgeResultReader,
 };
-pub use revisions::{ObservedRevision, RevisionError, RevisionRepository};
+pub use revisions::{ObservedRevision, ProvedIdRange, RevisionError, RevisionRepository};
 pub use runs::{DigestRun, RunError, RunRepository, RunState, RunTrigger};
 pub use runtime::{RuntimeError, run_api, run_worker};
 pub use session::{SessionError, SessionMaterial};

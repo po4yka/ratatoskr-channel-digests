@@ -20,6 +20,18 @@ pub struct ObservedRevision<'a> {
     pub observed_at: &'a str,
 }
 
+/// The message ids one provider page proves, as a half-open interval of channel-local ids.
+///
+/// A newest-first page answers for every message id below the cursor it was requested with, from
+/// its own lowest id down; a short last page also answers for everything below that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProvedIdRange {
+    /// Lowest id the page proves, inclusive. `i64::MIN` means down to the start of the channel.
+    pub lowest: i64,
+    /// First id above the proved range, exclusive. `None` means no upper limit.
+    pub below: Option<i64>,
+}
+
 /// Safe immutable-revision failure.
 #[derive(Debug, thiserror::Error)]
 #[error("revision storage is unavailable")]
@@ -64,5 +76,41 @@ impl RevisionRepository {
         .await
         .map_err(|_| RevisionError)?;
         Ok(row.0)
+    }
+
+    /// Withdraws the stored messages a page proves are gone, and the ones it marks deleted.
+    ///
+    /// A stored, non-deleted message whose id lies inside `proved` and is not in `present` is
+    /// withdrawn, and so is every stored, non-deleted message in `deleted` wherever it lies. All
+    /// revisions of a withdrawn message get `deleted_at`, lose their body and get `minimized_at`
+    /// in one statement; content is not kept for a deleted post. Returns the revisions changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free storage class on any database rejection.
+    pub async fn withdraw_missing(
+        &self,
+        channel_id: Uuid,
+        proved: ProvedIdRange,
+        (present, deleted): (&[i64], &[i64]),
+    ) -> Result<u64, RevisionError> {
+        let result = sqlx::query(
+            "update channel_digests.post_revisions
+             set deleted_at = now(), body = null, minimized_at = coalesce(minimized_at, now())
+             where channel_id = $1 and deleted_at is null
+               and ((provider_message_id >= $2
+                     and ($3::bigint is null or provider_message_id < $3)
+                     and provider_message_id <> all($4::bigint[]))
+                    or provider_message_id = any($5::bigint[]))",
+        )
+        .bind(channel_id)
+        .bind(proved.lowest)
+        .bind(proved.below)
+        .bind(present)
+        .bind(deleted)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| RevisionError)?;
+        Ok(result.rows_affected())
     }
 }

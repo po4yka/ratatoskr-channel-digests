@@ -5,8 +5,8 @@
 
 ## 2. Deleted posts (R5-07 rule 2)
 
-- [ ] 2.1 RED: add `tests/deleted_posts.rs` (vanished id inside the proved range, outside it, a `max_pages` stop, a provider error mid-walk, a media-only post, `deleted: true`, and the first-page, middle-page and short-last-page range cases) and a `tests/revisions.rs` case that selection never returns a revision with `deleted_at`; run them and confirm they fail because nothing sets `deleted_at`.
-- [ ] 2.2 GREEN: add `RevisionRepository::withdraw_missing`, call it from `AcquisitionEngine::store_page` with the range of each page, withdraw `deleted: true` posts, and filter `deleted_at is null` in `select_sources`.
+- [x] 2.1 RED: add `tests/deleted_posts.rs` (vanished id inside the proved range, outside it, a `max_pages` stop, a provider error mid-walk, a media-only post, `deleted: true`, and the first-page, middle-page and short-last-page range cases) and a `tests/revisions.rs` case that selection never returns a revision with `deleted_at`; run them and confirm they fail because nothing sets `deleted_at`.
+- [x] 2.2 GREEN: add `RevisionRepository::withdraw_missing`, call it from `AcquisitionEngine::store_page` with the range of each page, withdraw `deleted: true` posts, and filter `deleted_at is null` in `select_sources`.
 
 ## 3. Retention timer (R5-07 rule 3)
 

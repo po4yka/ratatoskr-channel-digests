@@ -319,7 +319,7 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                        and r.published_at < $3::timestamptz
                  ) o
                  join channel_digests.channels c on c.channel_id = o.channel_id
-                 where o.body is not null
+                 where o.body is not null and o.deleted_at is null
                  order by o.channel_id, o.provider_message_id, o.observed_at desc,
                           o.revision_id desc
              ) selected

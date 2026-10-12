@@ -7,8 +7,8 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ObservedRevision, ProviderError, ProviderPage, PublicChannelProvider, PublicChannelUsername,
-    RevisionRepository,
+    ObservedRevision, ProvedIdRange, ProviderError, ProviderPage, ProviderPost,
+    PublicChannelProvider, PublicChannelUsername, RevisionRepository,
 };
 
 /// One finite acquisition execution request.
@@ -126,6 +126,8 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
             let (stored, reached_window_start) = self
                 .store_page(request, &username, (start, end), &page, &mut seen)
                 .await?;
+            self.withdraw_absent(request.channel_id, before, &page)
+                .await?;
             revisions += stored;
             // Pages arrive newest first and ids rise with time, so the first post older than the
             // window proves every later one older: the whole window has been read.
@@ -205,6 +207,36 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
             }
         }
         Ok((stored, reached_window_start))
+    }
+
+    /// Withdraws the stored posts this page proves are gone.
+    ///
+    /// The page answered a request for ids below `requested_before` (no limit for the first page of
+    /// a walk), so it proves the ids from its own lowest down to that cursor; a short page, with no
+    /// next cursor, reaches the start of the channel. A post without text is still on the page and
+    /// so is present; a post the provider marks deleted is withdrawn wherever it lies.
+    async fn withdraw_absent(
+        &self,
+        channel_id: Uuid,
+        requested_before: Option<i64>,
+        page: &ProviderPage,
+    ) -> Result<(), AcquisitionError> {
+        let Some(proved) = proved_range(page, requested_before) else {
+            return Ok(());
+        };
+        let (deleted, present): (Vec<i64>, Vec<i64>) = {
+            let (gone, live): (Vec<&ProviderPost>, Vec<&ProviderPost>) =
+                page.posts.iter().partition(|post| post.deleted);
+            (
+                gone.iter().map(|post| post.message_id).collect(),
+                live.iter().map(|post| post.message_id).collect(),
+            )
+        };
+        self.revisions
+            .withdraw_missing(channel_id, proved, (&present, &deleted))
+            .await
+            .map(|_withdrawn| ())
+            .map_err(|_| AcquisitionError::Unavailable)
     }
 
     async fn resolve(
@@ -299,6 +331,26 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
         .map_err(|_| AcquisitionError::Unavailable)?;
         Ok(())
     }
+}
+
+/// The ids a page proves: from its lowest id, or from the channel start for a short last page.
+///
+/// A page with a next cursor and no post proves nothing, so the range is absent.
+fn proved_range(page: &ProviderPage, requested_before: Option<i64>) -> Option<ProvedIdRange> {
+    if page.next_before_message_id.is_none() {
+        return Some(ProvedIdRange {
+            lowest: i64::MIN,
+            below: requested_before,
+        });
+    }
+    page.posts
+        .iter()
+        .map(|post| post.message_id)
+        .min()
+        .map(|lowest| ProvedIdRange {
+            lowest,
+            below: requested_before,
+        })
 }
 
 fn acquisition_kind(channel_id: Uuid) -> String {
