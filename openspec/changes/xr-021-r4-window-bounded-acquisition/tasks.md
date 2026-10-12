@@ -5,8 +5,8 @@
 
 ## 2. Documentation (R4-06)
 
-- [ ] 2.1 Update `docs/OPERATIONS.md` so it says when `acquisition_incomplete` is set (page limit reached while pages still reach into the window, a provider failure mid-walk, an unavailable channel) and when it is not (the window start was reached). No failing test applies because this task only edits documentation.
+- [x] 2.1 Update `docs/OPERATIONS.md` so it says when `acquisition_incomplete` is set (page limit reached while pages still reach into the window, a provider failure mid-walk, an unavailable channel) and when it is not (the window start was reached). No failing test applies because this task only edits documentation.
 
 ## 3. Gate
 
-- [ ] 3.1 Run the `DEVELOPMENT.md` gate to green. No failing test applies because this task only runs checks.
+- [x] 3.1 Run the `DEVELOPMENT.md` gate to green. No failing test applies because this task only runs checks.
