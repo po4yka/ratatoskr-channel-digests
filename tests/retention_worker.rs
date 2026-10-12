@@ -22,7 +22,7 @@ const MARKER: &str = "unique-retention-payload";
 #[tokio::test]
 async fn a_sweep_nulls_only_old_bodies_and_keeps_provenance() -> TestResult {
     let (database, channel) = seeded().await?;
-    let now = jiff::Timestamp::now();
+    let now = fixed_now()?;
     let old = insert(&database, channel, 1, now, 40).await?;
     let young = insert(&database, channel, 2, now, 10).await?;
     let counter = RetentionCounter::new();
@@ -50,7 +50,7 @@ async fn a_sweep_nulls_only_old_bodies_and_keeps_provenance() -> TestResult {
 #[tokio::test]
 async fn one_pass_minimizes_at_most_5000_rows() -> TestResult {
     let (database, channel) = seeded().await?;
-    let now = jiff::Timestamp::now();
+    let now = fixed_now()?;
     let published = now.checked_sub(jiff::SignedDuration::from_hours(24 * 40))?;
     sqlx::query(
         "insert into channel_digests.post_revisions
@@ -86,7 +86,7 @@ async fn the_supervisor_sweeps_on_its_own_timer_and_logs_only_a_count() -> TestR
             .finish(),
     );
     let (database, channel) = seeded().await?;
-    let now = jiff::Timestamp::now();
+    let now = fixed_now()?;
     let old = insert(&database, channel, 1, now, 40).await?;
     let counter = RetentionCounter::new();
     let (drain_tx, drain_rx) = watch::channel(false);
@@ -136,6 +136,12 @@ async fn the_counter_is_served_in_the_prometheus_text_format() -> TestResult {
         "{text}"
     );
     Ok(())
+}
+
+/// A fixed instant, so no test depends on the wall clock. Rows are aged relative to it, and the
+/// supervisor test runs later than it, so a row 40 days older is past the 30 day window either way.
+fn fixed_now() -> Result<jiff::Timestamp, jiff::Error> {
+    "2026-06-01T00:00:00Z".parse()
 }
 
 /// A database with one channel and nothing else.
