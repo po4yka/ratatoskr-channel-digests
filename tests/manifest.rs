@@ -5,8 +5,8 @@ use std::time::Duration;
 use ratatoskr_channel_digest_contracts::{ChannelDigestManifest, sha256_hex};
 use ratatoskr_channel_digests::{
     CommandIntake, Database, ManifestBuilder, ManifestError, ManifestSource, ObservedRevision,
-    ProviderError, ProviderPage, PublicChannelProvider, PublicChannelUsername, RevisionRepository,
-    RunExecutor, SubscriptionRepository,
+    ProviderError, ProviderPage, ProviderPost, PublicChannelProvider, PublicChannelUsername,
+    RevisionRepository, RunExecutor, SubscriptionRepository,
 };
 use uuid::Uuid;
 
@@ -140,7 +140,7 @@ async fn built_manifest_round_trips_through_the_contract_and_matches_the_stored_
         .accept_run(Uuid::now_v7(), &command)
         .await?;
 
-    let executor = RunExecutor::new(database.pool().clone(), EmptyProvider);
+    let executor = RunExecutor::new(database.pool().clone(), SeededChannels);
     assert!(executor.execute_one().await?);
 
     let (manifest_id, stored, stored_sha256): (Uuid, String, String) = sqlx::query_as(
@@ -242,10 +242,12 @@ async fn channel_id(pool: &sqlx::PgPool, username: &str) -> Result<Uuid, sqlx::E
     Ok(row.0)
 }
 
+/// Serves the one live post of each seeded channel, so that nothing seeded reads as deleted: a
+/// page that is empty or short proves the channel holds nothing else.
 #[derive(Debug)]
-struct EmptyProvider;
+struct SeededChannels;
 
-impl PublicChannelProvider for EmptyProvider {
+impl PublicChannelProvider for SeededChannels {
     type Channel = String;
 
     async fn resolve_public_channel(
@@ -257,12 +259,22 @@ impl PublicChannelProvider for EmptyProvider {
 
     async fn fetch_public_posts(
         &self,
-        _channel: &Self::Channel,
+        channel: &Self::Channel,
         _before_message_id: Option<i64>,
         _limit: usize,
     ) -> Result<ProviderPage, ProviderError> {
+        let (message_id, body, published_at) = if channel == "manifest_alpha" {
+            (17, "edited text", "2026-08-29T08:00:00Z")
+        } else {
+            (4, "bravo post", "2026-08-29T07:00:00Z")
+        };
         Ok(ProviderPage {
-            posts: Vec::new(),
+            posts: vec![ProviderPost {
+                message_id,
+                body: body.to_owned(),
+                published_at: published_at.to_owned(),
+                deleted: false,
+            }],
             next_before_message_id: None,
         })
     }

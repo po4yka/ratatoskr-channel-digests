@@ -356,7 +356,17 @@ async fn manifest_limit_fails_the_run_instead_of_retrying_forever() -> TestResul
         .await?;
     let operation = Uuid::now_v7();
     let run_id = accept_run(&database, owner, operation).await?;
-    let executor = RunExecutor::new(database.pool().clone(), PageProvider::new(Vec::new()));
+    // The provider still lists the post, so the walk does not withdraw it; acquisition skips the
+    // oversized body itself and the stored revision stays the only candidate.
+    let executor = RunExecutor::new(
+        database.pool().clone(),
+        PageProvider::new(vec![ProviderPost {
+            message_id: 9,
+            body: oversized,
+            published_at: POST_AT.to_owned(),
+            deleted: false,
+        }]),
+    );
 
     assert!(executor.execute_one().await?);
 
