@@ -167,6 +167,180 @@ async fn flood_wait_is_persisted_and_blocks_early_retry() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[tokio::test]
+async fn a_page_that_straddles_the_window_start_is_stored_in_full_and_ends_the_walk()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (database, channel_id) = fresh_channel("straddle").await?;
+    let provider = FakeProvider::new([
+        dated_page(
+            [
+                (12, "newest", "2026-08-21T10:00:00Z"),
+                (11, "oldest in the window", "2026-08-20T12:00:00Z"),
+                (10, "before the window", "2026-08-19T23:00:00Z"),
+            ],
+            Some(10),
+        ),
+        dated_page([(9, "never requested", "2026-08-19T22:00:00Z")], None),
+    ]);
+    let calls = Arc::clone(&provider.calls);
+    let run_id = Uuid::now_v7();
+    let request = windowed_request(run_id, channel_id, 5, 3);
+
+    let report = engine(&database, provider).execute(&request).await?;
+
+    assert_eq!(
+        *calls.lock().expect("calls lock"),
+        vec![None],
+        "the straddling page ends the walk"
+    );
+    assert_eq!(report.pages, 1);
+    assert_eq!(report.revisions, 2, "both in-window posts are stored");
+    assert!(!report.partial, "the window start was reached");
+    assert_eq!(
+        checkpoint_state(&database, channel_id, run_id).await?,
+        "completed"
+    );
+    let stored: (i64,) =
+        sqlx::query_as("select count(*) from channel_digests.post_revisions where channel_id = $1")
+            .bind(channel_id)
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(stored.0, 2);
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_post_exactly_at_window_start_is_inside_the_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (database, channel_id) = fresh_channel("boundary").await?;
+    let provider = FakeProvider::new([
+        dated_page(
+            [(5, "at the window start", "2026-08-20T00:00:00Z")],
+            Some(5),
+        ),
+        dated_page([(4, "just before", "2026-08-19T23:59:59Z")], Some(4)),
+        dated_page([(3, "never requested", "2026-08-19T00:00:00Z")], None),
+    ]);
+    let calls = Arc::clone(&provider.calls);
+    let run_id = Uuid::now_v7();
+    let request = windowed_request(run_id, channel_id, 5, 1);
+
+    let report = engine(&database, provider).execute(&request).await?;
+
+    assert_eq!(
+        *calls.lock().expect("calls lock"),
+        vec![None, Some(5)],
+        "a post at the window start does not end the walk; the post after it does"
+    );
+    assert_eq!(
+        report.revisions, 1,
+        "the boundary post is inside the window"
+    );
+    assert!(!report.partial);
+    assert_eq!(
+        checkpoint_state(&database, channel_id, run_id).await?,
+        "completed"
+    );
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_mid_walk_provider_failure_is_still_partial() -> Result<(), Box<dyn std::error::Error>> {
+    let (database, channel_id) = fresh_channel("midwalk").await?;
+    let provider = FakeProvider::new([dated_page(
+        [(9, "in the window", "2026-08-21T10:00:00Z")],
+        Some(8),
+    )]);
+    let run_id = Uuid::now_v7();
+    let request = windowed_request(run_id, channel_id, 5, 1);
+
+    let report = engine(&database, provider).execute(&request).await?;
+
+    assert_eq!(report.pages, 1);
+    assert!(report.partial, "the provider failed with pages behind it");
+    assert_eq!(
+        checkpoint_state(&database, channel_id, run_id).await?,
+        "provider_unavailable"
+    );
+    database.close().await;
+    Ok(())
+}
+
+fn engine(database: &Database, provider: FakeProvider) -> AcquisitionEngine<FakeProvider> {
+    AcquisitionEngine::new(
+        provider,
+        RevisionRepository::new(database.pool().clone()),
+        Duration::from_millis(100),
+    )
+}
+
+fn windowed_request(
+    run_id: Uuid,
+    channel_id: Uuid,
+    max_pages: usize,
+    page_size: usize,
+) -> AcquisitionRequest<'static> {
+    AcquisitionRequest {
+        run_id,
+        channel_id,
+        username: "example_channel",
+        window_start: "2026-08-20T00:00:00Z",
+        window_end: "2026-08-22T00:00:00Z",
+        max_pages,
+        page_size,
+    }
+}
+
+async fn fresh_channel(prefix: &str) -> Result<(Database, Uuid), Box<dyn std::error::Error>> {
+    let url = std::env::var("CHANNEL_DIGEST_TEST_DATABASE_URL")?;
+    let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
+    database.apply_schema().await?;
+    let channel_id = Uuid::now_v7();
+    let suffix: String = channel_id.simple().to_string().chars().take(16).collect();
+    sqlx::query("insert into channel_digests.channels (channel_id, username) values ($1, $2)")
+        .bind(channel_id)
+        .bind(format!("{prefix}_{suffix}"))
+        .execute(database.pool())
+        .await?;
+    Ok((database, channel_id))
+}
+
+async fn checkpoint_state(
+    database: &Database,
+    channel_id: Uuid,
+    run_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    let row: (String,) = sqlx::query_as(
+        "select checkpoint->>'state' from channel_digests.leases
+         where resource_kind = $1 and resource_id = $2",
+    )
+    .bind(format!("acquisition:{channel_id}"))
+    .bind(run_id)
+    .fetch_one(database.pool())
+    .await?;
+    Ok(row.0)
+}
+
+fn dated_page<const N: usize>(
+    items: [(i64, &'static str, &'static str); N],
+    next: Option<i64>,
+) -> ProviderPage {
+    ProviderPage {
+        posts: items
+            .into_iter()
+            .map(|(message_id, body, published_at)| ProviderPost {
+                message_id,
+                body: body.to_owned(),
+                published_at: published_at.to_owned(),
+                deleted: false,
+            })
+            .collect(),
+        next_before_message_id: next,
+    }
+}
+
 fn page<const N: usize>(items: [(i64, &'static str); N], next: Option<i64>) -> ProviderPage {
     ProviderPage {
         posts: items

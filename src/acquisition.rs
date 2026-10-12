@@ -7,7 +7,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ObservedRevision, ProviderError, PublicChannelProvider, PublicChannelUsername,
+    ObservedRevision, ProviderError, ProviderPage, PublicChannelProvider, PublicChannelUsername,
     RevisionRepository,
 };
 
@@ -123,36 +123,17 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
                 Ok(Err(_)) | Err(_) => return Err(AcquisitionError::Unavailable),
             };
             pages += 1;
-            for post in &page.posts {
-                if post.deleted || post.body.is_empty() || post.body.len() > 16_384 {
-                    continue;
-                }
-                let published = post
-                    .published_at
-                    .parse::<jiff::Timestamp>()
-                    .map_err(|_| AcquisitionError::Unavailable)?;
-                if published < start || published >= end {
-                    continue;
-                }
-                let digest = Sha256::digest(post.body.as_bytes());
-                if seen.insert((post.message_id, digest.to_vec())) {
-                    let canonical_link =
-                        format!("https://t.me/{}/{}", username.as_str(), post.message_id);
-                    self.revisions
-                        .append(&ObservedRevision {
-                            channel_id: request.channel_id,
-                            provider_message_id: post.message_id,
-                            body: &post.body,
-                            canonical_link: &canonical_link,
-                            published_at: &post.published_at,
-                            observed_at: request.window_end,
-                        })
-                        .await
-                        .map_err(|_| AcquisitionError::Unavailable)?;
-                    revisions += 1;
-                }
-            }
-            before = page.next_before_message_id;
+            let (stored, reached_window_start) = self
+                .store_page(request, &username, (start, end), &page, &mut seen)
+                .await?;
+            revisions += stored;
+            // Pages arrive newest first and ids rise with time, so the first post older than the
+            // window proves every later one older: the whole window has been read.
+            before = if reached_window_start {
+                None
+            } else {
+                page.next_before_message_id
+            };
             self.checkpoint(request, before, pages, revisions, "page_committed", None)
                 .await?;
             if before.is_none() {
@@ -174,6 +155,56 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
             revisions,
             partial,
         })
+    }
+
+    /// Stores the in-window posts of one page and says whether the page reached the window start.
+    ///
+    /// Pages arrive newest first, so a post published before the window start proves every later
+    /// one older. The page is still stored in full: its other posts may lie inside the window.
+    async fn store_page(
+        &self,
+        request: &AcquisitionRequest<'_>,
+        username: &PublicChannelUsername,
+        (start, end): (jiff::Timestamp, jiff::Timestamp),
+        page: &ProviderPage,
+        seen: &mut HashSet<(i64, Vec<u8>)>,
+    ) -> Result<(usize, bool), AcquisitionError> {
+        let mut stored = 0;
+        let mut reached_window_start = false;
+        for post in &page.posts {
+            if post.deleted || post.body.is_empty() || post.body.len() > 16_384 {
+                continue;
+            }
+            let published = post
+                .published_at
+                .parse::<jiff::Timestamp>()
+                .map_err(|_| AcquisitionError::Unavailable)?;
+            if published < start {
+                reached_window_start = true;
+                continue;
+            }
+            if published >= end {
+                continue;
+            }
+            let digest = Sha256::digest(post.body.as_bytes());
+            if seen.insert((post.message_id, digest.to_vec())) {
+                let canonical_link =
+                    format!("https://t.me/{}/{}", username.as_str(), post.message_id);
+                self.revisions
+                    .append(&ObservedRevision {
+                        channel_id: request.channel_id,
+                        provider_message_id: post.message_id,
+                        body: &post.body,
+                        canonical_link: &canonical_link,
+                        published_at: &post.published_at,
+                        observed_at: request.window_end,
+                    })
+                    .await
+                    .map_err(|_| AcquisitionError::Unavailable)?;
+                stored += 1;
+            }
+        }
+        Ok((stored, reached_window_start))
     }
 
     async fn resolve(

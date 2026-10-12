@@ -2,7 +2,8 @@
 //! (XR-021 CONTRACTS.md R3-10 rules 1 to 3).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ratatoskr_channel_digest_contracts::OutputLanguage;
@@ -20,6 +21,10 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const WINDOW_START: &str = "2026-08-28T10:00:00Z";
 const WINDOW_END: &str = "2026-08-29T10:00:00Z";
 const POST_AT: &str = "2026-08-29T09:00:00Z";
+const OLDER_THAN_WINDOW: &str = "2026-08-27T09:00:00Z";
+/// More pages than the executor's page limit of twenty, so a walk that never stops runs dry only
+/// after it has exhausted the limit.
+const DEEP_HISTORY_PAGES: usize = 40;
 
 #[tokio::test]
 async fn one_unavailable_channel_and_no_posts_fails_the_run_instead_of_completing_empty()
@@ -249,6 +254,190 @@ async fn an_incomplete_scheduled_run_settles_partial_without_a_report() -> TestR
     Ok(())
 }
 
+#[tokio::test]
+async fn deep_history_with_the_window_satisfied_on_page_one_is_not_partial() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "deep_history").await?;
+    let operation = Uuid::now_v7();
+    let run_id = accept_run(&database, owner, operation).await?;
+    let mut steps = vec![Step::Page(page_with_dates(
+        &[
+            (1_000, "in the window", POST_AT),
+            (999, "before it", OLDER_THAN_WINDOW),
+        ],
+        Some(999),
+    ))];
+    steps.extend(older_pages(998));
+    let provider = ScriptedProvider::new([("deep_history", steps)]);
+    let calls = provider.calls();
+
+    assert!(
+        RunExecutor::new(database.pool().clone(), provider)
+            .execute_one()
+            .await?
+    );
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the first page already reaches before the window"
+    );
+    assert!(
+        !incomplete_flag(database.pool(), run_id).await?,
+        "a window read to its start is complete however deep the history is"
+    );
+    assert_eq!(
+        acquisition_state(database.pool(), run_id).await?,
+        "completed"
+    );
+    assert_eq!(run_state(database.pool(), run_id).await?.0, "waiting_recap");
+    settle(
+        &database,
+        owner,
+        operation,
+        run_id,
+        Uuid::now_v7(),
+        (1, 1, 0),
+    )
+    .await?;
+    assert_eq!(result_outcome(database.pool(), run_id).await?, "completed");
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(terminal_statuses(&reports), ["succeeded"]);
+    assert!(typed(&reports, reports.len() - 1)?.warnings.is_empty());
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_quiet_channel_with_deep_history_completes_as_an_empty_success() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "quiet_deep").await?;
+    let operation = Uuid::now_v7();
+    let run_id = accept_run(&database, owner, operation).await?;
+    let mut steps = vec![Step::Page(page_with_dates(
+        &[
+            (500, "long ago", OLDER_THAN_WINDOW),
+            (499, "longer ago", OLDER_THAN_WINDOW),
+        ],
+        Some(499),
+    ))];
+    steps.extend(older_pages(498));
+    let provider = ScriptedProvider::new([("quiet_deep", steps)]);
+    let calls = provider.calls();
+
+    assert!(
+        RunExecutor::new(database.pool().clone(), provider)
+            .execute_one()
+            .await?
+    );
+
+    assert_eq!(
+        run_state(database.pool(), run_id).await?,
+        ("completed".to_owned(), None),
+        "no post in the window is an empty success, not an unavailable provider"
+    );
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(terminal_statuses(&reports), ["succeeded"]);
+    assert_eq!(
+        reports
+            .last()
+            .and_then(|report| report.get("stage"))
+            .and_then(Value::as_str),
+        Some("no_sources")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_window_longer_than_max_pages_full_pages_is_still_partial() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "long_window").await?;
+    let operation = Uuid::now_v7();
+    let run_id = accept_run(&database, owner, operation).await?;
+    let steps: Vec<Step> = (0..DEEP_HISTORY_PAGES)
+        .map(|index| {
+            let id = 1_000 - i64::try_from(index).unwrap_or(0);
+            Step::Page(page_with_dates(
+                &[(id, "inside the window", POST_AT)],
+                Some(id),
+            ))
+        })
+        .collect();
+    let provider = ScriptedProvider::new([("long_window", steps)]);
+    let calls = provider.calls();
+
+    assert!(
+        RunExecutor::new(database.pool().clone(), provider)
+            .execute_one()
+            .await?
+    );
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        20,
+        "the page limit bounds the walk"
+    );
+    assert!(incomplete_flag(database.pool(), run_id).await?);
+    assert_eq!(
+        acquisition_state(database.pool(), run_id).await?,
+        "page_limit"
+    );
+    settle(
+        &database,
+        owner,
+        operation,
+        run_id,
+        Uuid::now_v7(),
+        (20, 20, 0),
+    )
+    .await?;
+    assert_eq!(result_outcome(database.pool(), run_id).await?, "partial");
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(terminal_statuses(&reports), ["partially_succeeded"]);
+    assert_eq!(
+        warning_codes(&typed(&reports, reports.len() - 1)?),
+        ["channel_digest.acquisition_incomplete"]
+    );
+    database.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_mid_walk_provider_failure_is_still_partial() -> TestResult {
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "midwalk_failure").await?;
+    let run_id = accept_run(&database, owner, Uuid::now_v7()).await?;
+    let provider = ScriptedProvider::new([(
+        "midwalk_failure",
+        vec![
+            Step::Page(page(&[(100, "in the window")], Some(50))),
+            Step::Unavailable,
+        ],
+    )]);
+    let calls = provider.calls();
+
+    assert!(
+        RunExecutor::new(database.pool().clone(), provider)
+            .execute_one()
+            .await?
+    );
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(incomplete_flag(database.pool(), run_id).await?);
+    assert_eq!(
+        acquisition_state(database.pool(), run_id).await?,
+        "provider_unavailable"
+    );
+    database.close().await;
+    Ok(())
+}
+
 /// Runs the one pending run with a channel that returns `posts` posts and then fails.
 async fn execute_midway(database: &Database, username: &str, posts: i64) -> TestResult {
     let entries: Vec<(i64, String)> = (0..posts)
@@ -319,6 +508,47 @@ fn page(posts: &[(i64, &str)], next: Option<i64>) -> ProviderPage {
             .collect(),
         next_before_message_id: next,
     }
+}
+
+/// A page whose posts carry their own publication times.
+fn page_with_dates(posts: &[(i64, &str, &str)], next: Option<i64>) -> ProviderPage {
+    ProviderPage {
+        posts: posts
+            .iter()
+            .map(|(message_id, body, published_at)| ProviderPost {
+                message_id: *message_id,
+                body: (*body).to_owned(),
+                published_at: (*published_at).to_owned(),
+                deleted: false,
+            })
+            .collect(),
+        next_before_message_id: next,
+    }
+}
+
+/// Pages of posts that all predate the window, each with a cursor: a history with no end in sight.
+fn older_pages(first_id: i64) -> Vec<Step> {
+    (0..DEEP_HISTORY_PAGES)
+        .map(|index| {
+            let id = first_id - i64::try_from(index).unwrap_or(0);
+            Step::Page(page_with_dates(
+                &[(id, "ancient post", OLDER_THAN_WINDOW)],
+                Some(id),
+            ))
+        })
+        .collect()
+}
+
+/// The state of the acquisition checkpoint a run left behind.
+async fn acquisition_state(pool: &sqlx::PgPool, run_id: Uuid) -> Result<String, sqlx::Error> {
+    let row: (String,) = sqlx::query_as(
+        "select checkpoint->>'state' from channel_digests.leases
+         where resource_kind like 'acquisition:%' and resource_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
 }
 
 async fn fresh_database() -> Result<Database, Box<dyn std::error::Error>> {
@@ -441,16 +671,27 @@ enum Step {
 
 /// A provider whose answers are scripted per channel, one step per page request.
 #[derive(Debug)]
-struct ScriptedProvider(Mutex<HashMap<String, VecDeque<Step>>>);
+struct ScriptedProvider {
+    scripts: Mutex<HashMap<String, VecDeque<Step>>>,
+    calls: Arc<AtomicUsize>,
+}
 
 impl ScriptedProvider {
     fn new<const N: usize>(scripts: [(&str, Vec<Step>); N]) -> Self {
-        Self(Mutex::new(
-            scripts
-                .into_iter()
-                .map(|(username, steps)| (username.to_owned(), steps.into()))
-                .collect(),
-        ))
+        Self {
+            scripts: Mutex::new(
+                scripts
+                    .into_iter()
+                    .map(|(username, steps)| (username.to_owned(), steps.into()))
+                    .collect(),
+            ),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The count of page requests served, readable after the provider moved into an executor.
+    fn calls(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.calls)
     }
 }
 
@@ -470,8 +711,9 @@ impl PublicChannelProvider for ScriptedProvider {
         _before_message_id: Option<i64>,
         _limit: usize,
     ) -> Result<ProviderPage, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let step = self
-            .0
+            .scripts
             .lock()
             .map_err(|_| ProviderError::Unavailable)?
             .get_mut(channel)
