@@ -31,6 +31,11 @@ RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE=ru
 # A run that has not finished this many seconds after its last update is failed and its Platform
 # operation is reported as failed (60 to 86400).
 RATATOSKR__LIMITS__RUN_DEADLINE_SECONDS=1800
+# Stored post bodies are nulled this many days after their publication (8 to 3650, above the 7 day
+# window bound); the digest, provenance and publication time stay. The sweep runs every
+# SWEEP_INTERVAL_SECONDS (60 to 86400), at most 5000 rows per pass.
+RATATOSKR__RETENTION__BODY_DAYS=30
+RATATOSKR__RETENTION__SWEEP_INTERVAL_SECONDS=3600
 # Log lines go to standard output: json (one object per line) or pretty, and an EnvFilter directive string.
 RATATOSKR__TELEMETRY__LOG_FORMAT=json
 RATATOSKR__TELEMETRY__LOG_FILTER=info,hyper=warn,h2=warn,sqlx=warn

@@ -19,6 +19,7 @@ mod reaper;
 mod registration;
 mod reports;
 mod result_reader;
+mod retention;
 mod revisions;
 mod runs;
 mod runtime;
@@ -32,7 +33,8 @@ pub use bus::{
     verify_consumers,
 };
 pub use config::{
-    BusConfig, Config, ConfigError, LogFormat, Role, ScheduleConfig, TelemetryConfig,
+    BusConfig, Config, ConfigError, LogFormat, RetentionConfig, Role, ScheduleConfig,
+    TelemetryConfig,
 };
 pub use coordinator::{CoordinatorError, DigestCoordinator, OccurrenceRequest};
 pub use database::{Database, DatabaseError};
@@ -50,6 +52,7 @@ pub use registration::{RegistrationError, RegistrationOutcome, enqueue_schedule_
 pub use result_reader::{
     KnowledgeResultProjection, KnowledgeResultReadError, KnowledgeResultReader,
 };
+pub use retention::{RetentionCounter, RetentionSweeper, metrics_router, supervise_retention};
 pub use revisions::{ObservedRevision, ProvedIdRange, RevisionError, RevisionRepository};
 pub use runs::{DigestRun, RunError, RunRepository, RunState, RunTrigger};
 pub use runtime::{RuntimeError, run_api, run_worker};

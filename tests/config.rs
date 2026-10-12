@@ -1,7 +1,7 @@
 //! Strict finite configuration and role-separation behavior.
 
 use ratatoskr_channel_digest_contracts::OutputLanguage;
-use ratatoskr_channel_digests::{Config, Role};
+use ratatoskr_channel_digests::{Config, RetentionConfig, Role};
 
 fn base() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -402,6 +402,79 @@ fn source_count_is_finite_and_a_smaller_value_is_honoured() -> Result<(), Box<dy
         assert!(diagnostic.contains(SOURCE_COUNT), "{diagnostic}");
         assert!(!diagnostic.contains("LEAKME"));
     }
+    Ok(())
+}
+
+#[test]
+fn retention_keys_are_worker_only_finite_and_defaulted() -> Result<(), Box<dyn std::error::Error>> {
+    const BODY_DAYS: &str = "RATATOSKR__RETENTION__BODY_DAYS";
+    const SWEEP: &str = "RATATOSKR__RETENTION__SWEEP_INTERVAL_SECONDS";
+
+    let default = Config::from_environment(Role::Worker, worker_entries())?;
+    assert_eq!(
+        default.retention,
+        Some(RetentionConfig {
+            body_days: 30,
+            sweep_interval_seconds: 3_600
+        })
+    );
+
+    for (days, seconds) in [("8", "60"), ("3650", "86400"), ("45", "900")] {
+        let worker = Config::from_environment(
+            Role::Worker,
+            worker_entries()
+                .into_iter()
+                .chain([(BODY_DAYS, days), (SWEEP, seconds)]),
+        )?;
+        let retention = worker
+            .retention
+            .ok_or("the worker has a retention policy")?;
+        assert_eq!(retention.body_days.to_string(), days);
+        assert_eq!(retention.sweep_interval_seconds.to_string(), seconds);
+    }
+
+    for (key, value) in [
+        (BODY_DAYS, "7"),
+        (BODY_DAYS, "3651"),
+        (BODY_DAYS, "0"),
+        (BODY_DAYS, "-1"),
+        (BODY_DAYS, "soon-LEAKME"),
+        (SWEEP, "59"),
+        (SWEEP, "86401"),
+        (SWEEP, ""),
+    ] {
+        let error = Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain([(key, value)]),
+        )
+        .expect_err("a retention value outside its range must fail");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(key), "{diagnostic}");
+        assert!(
+            diagnostic.contains("is outside the finite range"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("LEAKME"));
+    }
+
+    for key in [BODY_DAYS, SWEEP] {
+        let error = Config::from_environment(
+            Role::Api,
+            base()
+                .into_iter()
+                .chain(reader_entries())
+                .chain([(key, "60")]),
+        )
+        .expect_err("the API role must refuse a worker-only retention key");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(key), "{diagnostic}");
+        assert!(
+            diagnostic.contains("is not recognized for this role"),
+            "{diagnostic}"
+        );
+    }
+    let api = Config::from_environment(Role::Api, base().into_iter().chain(reader_entries()))?;
+    assert!(api.retention.is_none());
     Ok(())
 }
 

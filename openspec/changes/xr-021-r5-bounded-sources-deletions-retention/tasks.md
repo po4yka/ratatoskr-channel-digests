@@ -10,8 +10,8 @@
 
 ## 3. Retention timer (R5-07 rule 3)
 
-- [ ] 3.1 RED: add the `tests/config.rs` cases for the two retention keys, `tests/retention_worker.rs` (a supervisor with a short interval nulls old bodies in batches of at most 5000, keeps digest, provenance and `published_at`, leaves younger bodies, increments the counter, keeps running with no provider) and the `tests/deployment_profile.rs` pin of the two keys in `worker.conf.example`; run them and confirm they fail because no caller and no keys exist (signature-only stubs are added first).
-- [ ] 3.2 GREEN: add the config keys and validation, the `limit` argument of `Maintenance::minimize_before` (and `tests/privacy.rs`), `supervise_retention` joined at shutdown next to the reaper, the counter and its metrics route, and the example file.
+- [x] 3.1 RED: add the `tests/config.rs` cases for the two retention keys, `tests/retention_worker.rs` (a supervisor with a short interval nulls old bodies in batches of at most 5000, keeps digest, provenance and `published_at`, leaves younger bodies, increments the counter, keeps running with no provider) and the `tests/deployment_profile.rs` pin of the two keys in `worker.conf.example`; run them and confirm they fail because no caller and no keys exist (signature-only stubs are added first).
+- [x] 3.2 GREEN: add the config keys and validation, the `limit` argument of `Maintenance::minimize_before` (and `tests/privacy.rs`), `supervise_retention` joined at shutdown next to the reaper, the counter and its metrics route, and the example file.
 
 ## 4. Documentation (R5-07)
 

@@ -137,6 +137,34 @@ fn shipped_examples_load_through_the_config_loader() -> TestResult {
 }
 
 #[test]
+fn the_worker_example_pins_the_retention_keys() -> TestResult {
+    let entries = example("worker.conf.example")?;
+    assert_eq!(
+        value(&entries, "RATATOSKR__RETENTION__BODY_DAYS"),
+        Some("30")
+    );
+    assert_eq!(
+        value(&entries, "RATATOSKR__RETENTION__SWEEP_INTERVAL_SECONDS"),
+        Some("3600")
+    );
+    let worker = Config::from_environment(Role::Worker, entries)?;
+    let retention = worker
+        .retention
+        .ok_or("the worker example sets the retention policy")?;
+    assert_eq!(
+        (retention.body_days, retention.sweep_interval_seconds),
+        (30, 3_600)
+    );
+    assert!(
+        example("api.conf.example")?
+            .iter()
+            .all(|(key, _)| !key.starts_with("RATATOSKR__RETENTION__")),
+        "the API role refuses the retention keys"
+    );
+    Ok(())
+}
+
+#[test]
 fn the_worker_example_documents_the_schedule_owner_prerequisite() -> TestResult {
     let path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?)
         .join("deploy/systemd/worker.conf.example");

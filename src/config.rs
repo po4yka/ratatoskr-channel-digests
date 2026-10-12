@@ -166,6 +166,15 @@ pub struct ScheduleConfig {
     pub output_language: OutputLanguage,
 }
 
+/// Worker-only retention of stored post bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// Days a stored post body is kept after its publication.
+    pub body_days: u32,
+    /// Seconds between two retention sweeps.
+    pub sweep_interval_seconds: u64,
+}
+
 /// API-only authority and finite policy for reading completed recaps from Knowledge.
 #[derive(Debug, Clone)]
 pub struct KnowledgeResultReaderConfig {
@@ -209,6 +218,8 @@ pub struct Config {
     pub bus: Option<BusConfig>,
     /// Present only for the worker role, and only when a schedule owner is configured.
     pub schedule: Option<ScheduleConfig>,
+    /// Present only for the worker role.
+    pub retention: Option<RetentionConfig>,
     /// Present only for the API role.
     pub knowledge_result_reader: Option<KnowledgeResultReaderConfig>,
     service_secret: Secret,
@@ -283,6 +294,7 @@ struct Builder {
     schedule_cron: Option<String>,
     schedule_enabled: Option<bool>,
     schedule_language: Option<OutputLanguage>,
+    retention: RetentionConfig,
     knowledge_base_url: Option<String>,
     knowledge_result_reader_service_secret: Option<Secret>,
     knowledge_connect_timeout_ms: Option<u64>,
@@ -310,6 +322,10 @@ impl Builder {
             schedule_cron: None,
             schedule_enabled: None,
             schedule_language: None,
+            retention: RetentionConfig {
+                body_days: 30,
+                sweep_interval_seconds: 3_600,
+            },
             knowledge_base_url: None,
             knowledge_result_reader_service_secret: None,
             knowledge_connect_timeout_ms: None,
@@ -380,6 +396,12 @@ impl Builder {
             "RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE" if self.role == Role::Worker => {
                 self.schedule_language = Some(parse_language(key, value)?);
             }
+            "RATATOSKR__RETENTION__BODY_DAYS" if self.role == Role::Worker => {
+                self.retention.body_days = parse_range(key, value, &8, &3_650)?;
+            }
+            "RATATOSKR__RETENTION__SWEEP_INTERVAL_SECONDS" if self.role == Role::Worker => {
+                self.retention.sweep_interval_seconds = parse_range(key, value, &60, &86_400)?;
+            }
             "RATATOSKR__KNOWLEDGE__BASE_URL" if self.role == Role::Api => {
                 self.knowledge_base_url = Some(loopback_http_base_url(key, value)?);
             }
@@ -408,6 +430,14 @@ impl Builder {
             "RATATOSKR__TELEMETRY__LOG_FILTER" => {
                 self.telemetry.log_filter = parse_log_filter(key, value)?;
             }
+            _ => return self.apply_limit(key, value),
+        }
+        Ok(())
+    }
+
+    /// The finite `LIMITS__*` keys, and the refusal of every other key.
+    fn apply_limit(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
+        match key {
             "RATATOSKR__LIMITS__REQUEST_BYTES" => {
                 self.limits.request_bytes = parse_range(key, value, &1, &1_048_576)?;
             }
@@ -514,6 +544,7 @@ impl Builder {
             provider,
             bus,
             schedule,
+            retention: (self.role == Role::Worker).then_some(self.retention),
             knowledge_result_reader,
             service_secret,
         })

@@ -157,10 +157,12 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
     crate::registration::enqueue_schedule_registration(database.pool(), config.schedule.as_ref())
         .await
         .map_err(|_| RuntimeError::Registration)?;
+    let retention = config.retention.ok_or(RuntimeError::Listener)?;
+    let retention_counter = crate::RetentionCounter::new();
     let (drain_tx, drain_rx) = watch::channel(false);
     let server = tokio::spawn(serve(
         operator,
-        operator_router(lifecycle.clone()),
+        operator_router(lifecycle.clone()).merge(crate::metrics_router(retention_counter.clone())),
         drain_rx.clone(),
     ));
     let handler = crate::WorkerMessageHandler::new(
@@ -210,11 +212,28 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
         ),
         drain_tx.subscribe(),
     ));
+    let sweeper = crate::RetentionSweeper::new(
+        database.pool().clone(),
+        retention.body_days,
+        retention_counter,
+    );
+    let retention_task = tokio::spawn({
+        let drain = drain_tx.subscribe();
+        async move {
+            crate::supervise_retention(
+                sweeper,
+                Duration::from_secs(retention.sweep_interval_seconds),
+                drain,
+            )
+            .await;
+            Ok::<(), RuntimeError>(())
+        }
+    });
     shutdown_signal().await?;
     lifecycle.begin_drain();
     let _sent = drain_tx.send(true);
     join_servers(
-        [server, worker, provider, reaper],
+        [server, worker, provider, reaper, retention_task],
         Duration::from_millis(config.limits.shutdown_timeout_ms),
     )
     .await?;
