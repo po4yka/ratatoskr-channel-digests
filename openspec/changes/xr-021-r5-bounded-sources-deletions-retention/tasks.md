@@ -19,4 +19,4 @@
 
 ## 5. Gate
 
-- [ ] 5.1 Run the `DEVELOPMENT.md` gate to green. No failing test applies because this task only runs checks.
+- [x] 5.1 Run the `DEVELOPMENT.md` gate to green. No failing test applies because this task only runs checks.
