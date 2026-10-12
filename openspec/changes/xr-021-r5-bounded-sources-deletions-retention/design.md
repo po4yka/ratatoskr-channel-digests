@@ -4,9 +4,9 @@ See `proposal.md`. The contract text is XR-021 CONTRACTS.md section R5-07; where
 
 ## Decisions
 
-### Newest first, one extra row to learn about truncation
+### Newest first, with the exact eligible count
 
-`select_sources` orders the deduplicated latest-revision rows by `published_at desc, channel_id, provider_message_id desc, revision_id desc` and takes `source_count + 1`. If `source_count + 1` rows came back, the run is truncated: the extra row is dropped and the rest are reversed into ascending manifest order (the S08 manifest ordering is unchanged, and `ManifestBuilder` still sorts by its own rule). `execute_one` ORs the truncation into `acquisition_incomplete` before `record_acquisition`, so the value stored on the run row and read later by the Knowledge completion path already includes it. The executor does not see the real total, only that more existed, so the WARN carries `selected` and `available_at_least` counts.
+`select_sources` orders the deduplicated latest-revision rows by `published_at desc, channel_id, provider_message_id desc, revision_id desc` and takes `source_count` of them, and the same statement returns `count(*) over ()`, the number of eligible rows before the limit. Contract R5-07 names `limit source_count + 1` as the way to learn that more existed; the window count learns the same fact and also the real total, so the WARN can carry both counts exactly (`selected` and `eligible`). The selected rows are reversed into ascending manifest order (the S08 manifest ordering is unchanged, and `ManifestBuilder` still sorts by its own rule). `execute_one` ORs the truncation into `acquisition_incomplete` before `record_acquisition`, so the value stored on the run row and read later by the Knowledge completion path already includes it.
 
 ### Withdrawal by absence uses the range a page proves
 

@@ -438,6 +438,70 @@ async fn a_mid_walk_provider_failure_is_still_partial() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_window_with_more_posts_than_one_digest_takes_settles_partially_succeeded() -> TestResult
+{
+    let database = fresh_database().await?;
+    let owner = Uuid::now_v7();
+    subscribe(&database, owner, "newest_only").await?;
+    let operation = Uuid::now_v7();
+    let run_id = accept_run(&database, owner, operation).await?;
+    let provider = ScriptedProvider::new([(
+        "newest_only",
+        vec![
+            Step::Page(numbered_page(151..=250, Some(151))),
+            Step::Page(numbered_page(51..=150, Some(51))),
+            Step::Page(numbered_page(1..=50, None)),
+        ],
+    )]);
+    assert!(
+        RunExecutor::new(database.pool().clone(), provider)
+            .execute_one()
+            .await?
+    );
+    assert!(
+        incomplete_flag(database.pool(), run_id).await?,
+        "250 posts do not fit one digest of 100"
+    );
+    let manifest: (i32,) = sqlx::query_as(
+        "select source_count from channel_digests.digest_manifests where run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(manifest.0, 100);
+
+    settle(
+        &database,
+        owner,
+        operation,
+        run_id,
+        Uuid::now_v7(),
+        (100, 100, 0),
+    )
+    .await?;
+
+    assert_eq!(result_outcome(database.pool(), run_id).await?, "partial");
+    let reports = raw_reports(database.pool(), operation).await?;
+    assert_eq!(terminal_statuses(&reports), ["partially_succeeded"]);
+    let report = typed(&reports, reports.len() - 1)?;
+    assert_eq!(
+        warning_codes(&report),
+        ["channel_digest.acquisition_incomplete"]
+    );
+    let message = report
+        .warnings
+        .first()
+        .map(|warning| warning.message.as_str())
+        .ok_or("the report carries a warning")?;
+    assert_eq!(
+        message,
+        "The digest does not cover every post of the window: some channels could not be read completely, or the window held more posts than one digest takes."
+    );
+    database.close().await;
+    Ok(())
+}
+
 /// Runs the one pending run with a channel that returns `posts` posts and then fails.
 async fn execute_midway(database: &Database, username: &str, posts: i64) -> TestResult {
     let entries: Vec<(i64, String)> = (0..posts)
@@ -519,6 +583,26 @@ fn page_with_dates(posts: &[(i64, &str, &str)], next: Option<i64>) -> ProviderPa
                 message_id: *message_id,
                 body: (*body).to_owned(),
                 published_at: (*published_at).to_owned(),
+                deleted: false,
+            })
+            .collect(),
+        next_before_message_id: next,
+    }
+}
+
+/// A page of posts with the given ids, newest first, each published a minute after the previous id.
+fn numbered_page(ids: std::ops::RangeInclusive<i64>, next: Option<i64>) -> ProviderPage {
+    ProviderPage {
+        posts: ids
+            .rev()
+            .map(|message_id| ProviderPost {
+                message_id,
+                body: format!("numbered post {message_id}"),
+                published_at: format!(
+                    "2026-08-28T{:02}:{:02}:00Z",
+                    10 + message_id / 60,
+                    message_id % 60
+                ),
                 deleted: false,
             })
             .collect(),

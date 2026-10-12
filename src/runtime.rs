@@ -191,11 +191,12 @@ pub async fn run_worker(config: Config, session: SessionMaterial) -> Result<(), 
     let provider_readiness = readiness;
     let provider_drain = drain_tx.subscribe();
     let provider_pool = database.pool().clone();
+    let source_count = config.limits.source_count;
     let provider = tokio::spawn(async move {
         supervise_provider(
             provider_config,
             session,
-            provider_pool,
+            (provider_pool, source_count),
             provider_readiness,
             provider_drain,
         )
@@ -249,7 +250,7 @@ async fn supervise_reaper(
 async fn supervise_provider(
     config: crate::config::ProviderConfig,
     session: SessionMaterial,
-    pool: sqlx::PgPool,
+    (pool, source_count): (sqlx::PgPool, usize),
     readiness: WorkerReadiness,
     mut drain: watch::Receiver<bool>,
 ) {
@@ -259,7 +260,8 @@ async fn supervise_provider(
         {
             Ok(provider) => {
                 readiness.set_provider(true);
-                let executor = RunExecutor::new(pool.clone(), &provider);
+                let executor =
+                    RunExecutor::new(pool.clone(), &provider).with_source_count(source_count);
                 let mut execution_tick = tokio::time::interval(Duration::from_secs(1));
                 execution_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {

@@ -13,6 +13,9 @@ use crate::{
     ManifestBuilder, ManifestSource, PublicChannelProvider, RevisionRepository,
 };
 
+/// Most source revisions one manifest may hold (S08).
+const MAX_SOURCE_COUNT: usize = 100;
+
 /// Safe run execution failure.
 #[derive(Debug, thiserror::Error)]
 #[error("digest run execution is unavailable")]
@@ -23,6 +26,7 @@ pub struct RunExecutionError;
 pub struct RunExecutor<P> {
     pool: sqlx::PgPool,
     provider: P,
+    source_count: usize,
 }
 
 /// One accepted or interrupted run, read from the run table alone.
@@ -49,7 +53,15 @@ type SourceRow = (
     String,
     String,
     i64,
+    i64,
 );
+
+/// The revisions one digest takes and whether the window held more than it could take.
+struct Selection {
+    sources: Vec<ManifestSource>,
+    /// Eligible revisions of the window before the cap.
+    eligible: usize,
+}
 
 /// Outcome of acquiring every subscribed channel for one run.
 enum Acquired {
@@ -67,7 +79,18 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
     /// Creates one executor.
     #[must_use]
     pub fn new(pool: sqlx::PgPool, provider: P) -> Self {
-        Self { pool, provider }
+        Self {
+            pool,
+            provider,
+            source_count: MAX_SOURCE_COUNT,
+        }
+    }
+
+    /// Caps how many source revisions one digest takes, within the manifest bound of 1 to 100.
+    #[must_use]
+    pub fn with_source_count(mut self, source_count: usize) -> Self {
+        self.source_count = source_count.clamp(1, MAX_SOURCE_COUNT);
+        self
     }
 
     /// Executes at most one accepted or interrupted run.
@@ -96,9 +119,19 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
             Acquired::Complete => false,
             Acquired::Incomplete => true,
         };
+        let selection = self.select_sources(&run).await?;
+        let truncated = selection.eligible > selection.sources.len();
+        if truncated {
+            tracing::warn!(
+                selected = selection.sources.len(),
+                eligible = selection.eligible,
+                class = "digest_source_count_exceeded",
+                "the window held more posts than one digest takes"
+            );
+        }
+        let incomplete = incomplete || truncated;
         self.record_acquisition(run.run_id, incomplete).await?;
-        let sources = self.select_sources(&run).await?;
-        self.commit(&coordinator, &run, &sources, incomplete)
+        self.commit(&coordinator, &run, &selection.sources, incomplete)
             .await?;
         Ok(true)
     }
@@ -256,16 +289,17 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
         Ok(())
     }
 
-    /// Selects the latest body of every message in the window, numbering all its revisions.
-    async fn select_sources(
-        &self,
-        run: &PendingRun,
-    ) -> Result<Vec<ManifestSource>, RunExecutionError> {
+    /// Selects the latest body of the newest messages in the window, numbering all its revisions.
+    ///
+    /// The cap keeps the newest `source_count` messages, never the oldest, and the rows are
+    /// returned oldest first, the order of the manifest. The same statement counts every eligible
+    /// message before the cap, so a truncation is known exactly.
+    async fn select_sources(&self, run: &PendingRun) -> Result<Selection, RunExecutionError> {
         let rows: Vec<SourceRow> = sqlx::query_as(
             "select revision_id, channel_id, username, display_name, provider_message_id,
                     content_sha256,
                     to_char(published_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-                    canonical_link, body, revision_index
+                    canonical_link, body, revision_index, count(*) over ()
              from (
                  select distinct on (o.channel_id, o.provider_message_id)
                         o.revision_id, o.channel_id, c.username, c.display_name,
@@ -289,16 +323,22 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                  order by o.channel_id, o.provider_message_id, o.observed_at desc,
                           o.revision_id desc
              ) selected
-             order by published_at, username, provider_message_id, revision_id limit 100",
+             order by published_at desc, channel_id, provider_message_id desc, revision_id desc
+             limit $4",
         )
         .bind(run.owner_id)
         .bind(&run.window_start)
         .bind(&run.window_end)
+        .bind(i64::try_from(self.source_count).map_err(|_| RunExecutionError)?)
         .fetch_all(&self.pool)
         .await
         .map_err(|_| RunExecutionError)?;
-        Ok(rows
+        let eligible = rows
+            .first()
+            .map_or(0, |row| usize::try_from(row.10).unwrap_or(usize::MAX));
+        let sources = rows
             .into_iter()
+            .rev()
             .map(
                 |(
                     revision_id,
@@ -311,6 +351,7 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                     canonical_link,
                     body,
                     revision_index,
+                    _eligible,
                 )| ManifestSource {
                     revision_id,
                     channel_id,
@@ -324,7 +365,8 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
                     revision_index: u32::try_from(revision_index).unwrap_or(0),
                 },
             )
-            .collect())
+            .collect();
+        Ok(Selection { sources, eligible })
     }
 
     /// Completes an empty selection, fails an unbuildable one, or commits the manifest.

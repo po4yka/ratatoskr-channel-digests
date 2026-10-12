@@ -377,6 +377,35 @@ fn run_deadline_is_finite() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn source_count_is_finite_and_a_smaller_value_is_honoured() -> Result<(), Box<dyn std::error::Error>>
+{
+    const SOURCE_COUNT: &str = "RATATOSKR__LIMITS__SOURCE_COUNT";
+
+    let default = Config::from_environment(Role::Worker, worker_entries())?;
+    assert_eq!(default.limits.source_count, 100);
+
+    for (value, expected) in [("1", 1), ("10", 10), ("100", 100)] {
+        let worker = Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain([(SOURCE_COUNT, value)]),
+        )?;
+        assert_eq!(worker.limits.source_count, expected, "{value}");
+    }
+
+    for value in ["0", "101", "-1", "many-LEAKME", ""] {
+        let error = Config::from_environment(
+            Role::Worker,
+            worker_entries().into_iter().chain([(SOURCE_COUNT, value)]),
+        )
+        .expect_err("a source count outside 1..=100 must fail");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(SOURCE_COUNT), "{diagnostic}");
+        assert!(!diagnostic.contains("LEAKME"));
+    }
+    Ok(())
+}
+
+#[test]
 fn schedule_output_language_is_strict_and_worker_only() -> Result<(), Box<dyn std::error::Error>> {
     const OWNER: &str = "RATATOSKR__SCHEDULE__OWNER_USER_ID";
     const LANGUAGE: &str = "RATATOSKR__SCHEDULE__OUTPUT_LANGUAGE";

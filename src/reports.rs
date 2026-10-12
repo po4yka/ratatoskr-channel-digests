@@ -184,7 +184,7 @@ pub(crate) async fn report_completion(
     if acquisition_incomplete {
         row = row.with_warning(
             "channel_digest.acquisition_incomplete",
-            "Some channels could not be read completely in this window.",
+            "The digest does not cover every post of the window: some channels could not be read completely, or the window held more posts than one digest takes.",
         )?;
     }
     row.enqueue(connection).await
