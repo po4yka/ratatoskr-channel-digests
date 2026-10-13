@@ -158,6 +158,17 @@ impl DigestCoordinator {
                 Err(CoordinatorError::Invalid)
             };
         }
+        let (channels, message_ids): (Vec<Uuid>, Vec<i64>) =
+            manifest.messages.iter().copied().unzip();
+        sqlx::query(
+            "insert into channel_digests.digest_manifest_sources (manifest_id, channel_id, provider_message_id) select $1, channel_id, provider_message_id from unnest($2::uuid[], $3::bigint[]) as held(channel_id, provider_message_id)",
+        )
+        .bind(manifest.manifest_id)
+        .bind(&channels)
+        .bind(&message_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| CoordinatorError::Storage)?;
         sqlx::query(
             "insert into channel_digests.outbox_messages (outbox_id, subject, semantic_key, owner_id, operation_id, payload) values ($1, 'knowledge.channel_digest_recap.requested.v1', $2, $3, $4, $5)",
         )

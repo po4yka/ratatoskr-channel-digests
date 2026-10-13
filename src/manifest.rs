@@ -54,6 +54,9 @@ pub struct CanonicalManifest {
     pub source_count: usize,
     /// Number of represented channels.
     pub channel_count: usize,
+    /// Distinct `(channel_id, provider_message_id)` pairs the manifest holds, ascending, so that
+    /// withdrawing a message can find the manifests that carry it.
+    pub messages: Vec<(Uuid, i64)>,
 }
 
 /// Safe manifest construction failure.
@@ -97,6 +100,12 @@ impl ManifestBuilder {
         if channel_count > MAX_CHANNELS {
             return Err(ManifestError::Limit);
         }
+        let messages = sources
+            .iter()
+            .map(|source| (source.channel_id, source.message_id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let window = DigestWindow::new(instant(window_start)?, instant(window_end)?)
             .map_err(|_| ManifestError::Invalid)?;
         let mut selected = sources
@@ -127,6 +136,7 @@ impl ManifestBuilder {
             sha256: sha256_hex(text.as_bytes()),
             source_count: manifest.sources.len(),
             channel_count,
+            messages,
             text,
         })
     }

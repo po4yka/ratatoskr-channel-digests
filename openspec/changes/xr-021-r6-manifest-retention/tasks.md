@@ -9,8 +9,8 @@
 
 ## 2. The builder carries the messages and the commit writes them (R6-02 rule 1)
 
-- [ ] 2.1 RED: extend `tests/manifest.rs`: `ManifestBuilder::build` over three sources in two channels (two of them two revisions of one message) returns the distinct `(channel_id, message_id)` pairs; `commit_manifest` writes exactly those rows in its transaction; a replay writes no second set; a commit that fails leaves no link row. Add the `CanonicalManifest::messages` field first, empty, so the test fails on the assertion.
-- [ ] 2.2 GREEN: `ManifestBuilder::build` fills the pairs and `commit_manifest` inserts them after the manifest row inside the transaction.
+- [x] 2.1 RED: extend `tests/manifest.rs`: `ManifestBuilder::build` over three sources in two channels (two of them two revisions of one message) returns the distinct `(channel_id, message_id)` pairs; `commit_manifest` writes exactly those rows in its transaction; a replay writes no second set; a commit that fails leaves no link row. Add the `CanonicalManifest::messages` field first, empty, so the test fails on the assertion.
+- [x] 2.2 GREEN: `ManifestBuilder::build` fills the pairs and `commit_manifest` inserts them after the manifest row inside the transaction.
 
 ## 3. The timer (R6-02 rule 2)
 
