@@ -190,7 +190,9 @@ async fn list_subscriptions(
 /// Serves the stored canonical manifest text verbatim when every claim matches the stored row.
 ///
 /// An absent manifest, another owner's manifest, a missing claim and a mismatching claim are all
-/// the same empty 404.
+/// the same empty 404. A manifest whose text was minimized by retention or a withdrawal answers an
+/// empty 410, and only to a caller whose owner, run and digest claims all match: the claims gate
+/// the row, so nobody else learns that it ever existed.
 async fn get_manifest(
     State(state): State<ApiState>,
     Extension(owner): Extension<AuthorizedOwner>,
@@ -204,7 +206,7 @@ async fn get_manifest(
     let (Some(run_id), Some(digest)) = (run_id, digest) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let row: Result<Option<(String,)>, _> = sqlx::query_as(
+    let row: Result<Option<(Option<String>,)>, _> = sqlx::query_as(
         "select canonical_text from channel_digests.digest_manifests where manifest_id = $1 and owner_id = $2 and run_id = $3 and sha256 = $4",
     )
     .bind(manifest_id)
@@ -214,7 +216,7 @@ async fn get_manifest(
     .fetch_optional(&state.pool)
     .await;
     match row {
-        Ok(Some((text,))) => (
+        Ok(Some((Some(text),))) => (
             StatusCode::OK,
             [(
                 header::CONTENT_TYPE,
@@ -223,6 +225,7 @@ async fn get_manifest(
             text,
         )
             .into_response(),
+        Ok(Some((None,))) => StatusCode::GONE.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }

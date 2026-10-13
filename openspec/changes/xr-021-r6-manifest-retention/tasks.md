@@ -24,8 +24,8 @@
 
 ## 5. The route (R6-02 rule 4)
 
-- [ ] 5.1 RED: extend `services/api/tests/views.rs`: a minimized manifest read with the right owner, run and digest answers `410` with an empty body and no `Content-Type`; the same row with a wrong digest, a wrong run or another owner answers `404` with an empty body; a live manifest still answers `200` with the exact text; a database failure is still `503`.
-- [ ] 5.2 GREEN: `get_manifest` answers `410` with an empty body for a matching row without text.
+- [x] 5.1 RED: extend `services/api/tests/views.rs`: a minimized manifest read with the right owner, run and digest answers `410` with an empty body and no `Content-Type`; the same row with a wrong digest, a wrong run or another owner answers `404` with an empty body; a live manifest still answers `200` with the exact text; a database failure is still `503`.
+- [x] 5.2 GREEN: `get_manifest` answers `410` with an empty body for a matching row without text.
 
 ## 6. Documentation (R6-02 rule 6)
 

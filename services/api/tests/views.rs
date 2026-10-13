@@ -5,7 +5,7 @@ mod support;
 
 use common::{
     RECAP_SENTINEL, SERVICE_SECRET, TestResult, assert_no_store, connect_database, request,
-    request_with_headers, response_body, seed_results, start_api, status,
+    request_with_headers, response_body, seed_results, start_api, start_api_with, status,
 };
 use ratatoskr_channel_digest_contracts::{
     ChannelDigestFailureClass, ChannelDigestOutcome, ChannelDigestResultPage,
@@ -237,6 +237,168 @@ fn manifest_with_wrong_run_id_or_wrong_digest_or_foreign_owner_is_404_with_empty
     headers.push(("Authorization", authorization.as_str()));
     let unparsable_owner = manifest_request(api.domain, seeded.manifest_id, &headers)?;
     assert_eq!(status(&unparsable_owner)?, 401);
+    runtime.block_on(database.close());
+    Ok(())
+}
+
+/// Drops the text of a seeded manifest, as the retention sweep and a withdrawal do.
+async fn minimize(pool: &sqlx::PgPool, manifest_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update channel_digests.digest_manifests set canonical_text = null, minimized_at = now() \
+         where manifest_id = $1",
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[test]
+fn a_minimized_manifest_is_410_with_an_empty_body_for_a_caller_that_proves_its_claims() -> TestResult
+{
+    let runtime = tokio::runtime::Runtime::new()?;
+    let database = connect_database(&runtime)?;
+    let seeded = runtime.block_on(seed_manifest(database.pool()))?;
+    runtime.block_on(minimize(database.pool(), seeded.manifest_id))?;
+    let api = start_api(HashMap::new())?;
+    let authorization = format!("Bearer {SERVICE_SECRET}");
+    let owner = seeded.owner_id.to_string();
+    let run = seeded.run_id.to_string();
+
+    let response = manifest_request(
+        api.domain,
+        seeded.manifest_id,
+        &[
+            ("Authorization", authorization.as_str()),
+            (HEADER_OWNER_ID, owner.as_str()),
+            (HEADER_DIGEST_RUN_ID, run.as_str()),
+            (HEADER_MANIFEST_DIGEST, seeded.sha256.as_str()),
+        ],
+    )?;
+
+    assert_eq!(status(&response)?, 410);
+    assert_no_store(&response);
+    assert!(
+        !response
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "a gone manifest has no JSON body: {response}"
+    );
+    assert!(response_body(&response)?.is_empty());
+    runtime.block_on(database.close());
+    Ok(())
+}
+
+#[test]
+fn a_minimized_manifest_is_still_404_for_every_claim_that_does_not_match() -> TestResult {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let database = connect_database(&runtime)?;
+    let seeded = runtime.block_on(seed_manifest(database.pool()))?;
+    runtime.block_on(minimize(database.pool(), seeded.manifest_id))?;
+    let api = start_api(HashMap::new())?;
+    let authorization = format!("Bearer {SERVICE_SECRET}");
+    let owner = seeded.owner_id.to_string();
+    let run = seeded.run_id.to_string();
+    let foreign_owner = Uuid::now_v7().to_string();
+    let other_run = Uuid::now_v7().to_string();
+    let other_digest = "0".repeat(64);
+    let digest = seeded.sha256.as_str();
+
+    let cases = [
+        (
+            "wrong run id",
+            seeded.manifest_id,
+            claims(Some(&owner), Some(&other_run), Some(digest)),
+        ),
+        (
+            "wrong digest",
+            seeded.manifest_id,
+            claims(Some(&owner), Some(&run), Some(&other_digest)),
+        ),
+        (
+            "foreign owner",
+            seeded.manifest_id,
+            claims(Some(&foreign_owner), Some(&run), Some(digest)),
+        ),
+        (
+            "missing digest",
+            seeded.manifest_id,
+            claims(Some(&owner), Some(&run), None),
+        ),
+        (
+            "unknown manifest",
+            Uuid::now_v7(),
+            claims(Some(&owner), Some(&run), Some(digest)),
+        ),
+    ];
+    let mut normalized = Vec::new();
+    for (name, manifest_id, held) in cases {
+        let mut headers = vec![("Authorization", authorization.as_str())];
+        headers.extend(held);
+        let response = manifest_request(api.domain, manifest_id, &headers)?;
+        assert_eq!(status(&response)?, 404, "{name}");
+        assert!(
+            response_body(&response)?.is_empty(),
+            "{name} must have an empty body"
+        );
+        normalized.push(without_date(&response));
+    }
+    assert!(
+        normalized.windows(2).all(|pair| pair[0] == pair[1]),
+        "the 404 cases stay indistinguishable, and a minimized row is not told apart from an absent one"
+    );
+    runtime.block_on(database.close());
+    Ok(())
+}
+
+#[test]
+fn a_database_failure_while_reading_a_manifest_is_503() -> TestResult {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let database = connect_database(&runtime)?;
+    let seeded = runtime.block_on(seed_manifest(database.pool()))?;
+    // A throwaway database whose manifest table is dropped under the running API, so the read fails
+    // there and the shared test database is never touched.
+    let name = format!("digest_503_{}", Uuid::now_v7().simple());
+    runtime.block_on(sqlx::query(&format!("create database {name}")).execute(database.pool()))?;
+    let url = common::database_url();
+    let (base, _) = url.rsplit_once('/').ok_or("database url has no name")?;
+    let broken_url = format!("{base}/{name}");
+    let broken = runtime.block_on(ratatoskr_channel_digests::Database::connect(
+        &broken_url,
+        1,
+        std::time::Duration::from_secs(2),
+    ))?;
+    // The API applies the schema when it starts, so the table goes away once it is running.
+    let api = start_api_with(HashMap::new(), &[("RATATOSKR__DATABASE__URL", &broken_url)]);
+    let dropped = runtime.block_on(
+        sqlx::query(
+            "drop table channel_digests.digest_results, channel_digests.digest_manifests cascade",
+        )
+        .execute(broken.pool()),
+    );
+    runtime.block_on(broken.close());
+    let outcome = api.and_then(|api| {
+        let authorization = format!("Bearer {SERVICE_SECRET}");
+        let (owner, run) = (seeded.owner_id.to_string(), seeded.run_id.to_string());
+        manifest_request(
+            api.domain,
+            seeded.manifest_id,
+            &[
+                ("Authorization", authorization.as_str()),
+                (HEADER_OWNER_ID, owner.as_str()),
+                (HEADER_DIGEST_RUN_ID, run.as_str()),
+                (HEADER_MANIFEST_DIGEST, seeded.sha256.as_str()),
+            ],
+        )
+    });
+    runtime.block_on(
+        sqlx::query(&format!("drop database {name} with (force)")).execute(database.pool()),
+    )?;
+    dropped?;
+    let response = outcome?;
+
+    assert_eq!(status(&response)?, 503);
+    assert!(response_body(&response)?.is_empty());
     runtime.block_on(database.close());
     Ok(())
 }
