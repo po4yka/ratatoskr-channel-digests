@@ -180,7 +180,8 @@ impl Channel {
         let database = Database::connect(&url, 3, Duration::from_secs(2)).await?;
         database.apply_schema().await?;
         sqlx::query(
-            "truncate channel_digests.digest_results, channel_digests.digest_manifests,
+            "truncate channel_digests.digest_results, channel_digests.digest_manifest_sources,
+                  channel_digests.digest_manifests,
                       channel_digests.post_revisions, channel_digests.subscriptions,
                       channel_digests.channels, channel_digests.digest_runs,
                       channel_digests.inbox_messages, channel_digests.outbox_messages,

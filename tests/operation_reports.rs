@@ -576,7 +576,8 @@ async fn fresh_database() -> Result<Database, Box<dyn std::error::Error>> {
 
 async fn reset(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "truncate channel_digests.digest_results, channel_digests.digest_manifests,
+        "truncate channel_digests.digest_results, channel_digests.digest_manifest_sources,
+                  channel_digests.digest_manifests,
                   channel_digests.post_revisions, channel_digests.subscriptions,
                   channel_digests.channels, channel_digests.digest_runs,
                   channel_digests.inbox_messages, channel_digests.outbox_messages,

@@ -237,10 +237,26 @@ create table if not exists channel_digests.digest_manifests (
     sha256 text not null check (length(sha256) = 64),
     source_count integer not null check (source_count between 1 and 100),
     channel_count integer not null check (channel_count between 1 and 20),
-    canonical_text text not null,
+    canonical_text text,
+    minimized_at timestamptz,
     created_at timestamptz not null default now(),
-    unique (owner_id, manifest_id)
+    unique (owner_id, manifest_id),
+    constraint digest_manifests_text_xor_minimized check (
+        (canonical_text is not null and minimized_at is null)
+        or (canonical_text is null and minimized_at is not null)
+    )
 );
+
+-- The messages a manifest holds, so withdrawing a message can minimize the manifests that carry
+-- it. There is no reference to post_revisions: withdrawal works by message, not by revision.
+create table if not exists channel_digests.digest_manifest_sources (
+    manifest_id uuid not null references channel_digests.digest_manifests(manifest_id),
+    channel_id uuid not null,
+    provider_message_id bigint not null,
+    primary key (manifest_id, channel_id, provider_message_id)
+);
+create index if not exists digest_manifest_sources_message_idx
+    on channel_digests.digest_manifest_sources (channel_id, provider_message_id);
 
 create table if not exists channel_digests.digest_results (
     result_id uuid primary key,

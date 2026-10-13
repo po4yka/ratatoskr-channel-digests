@@ -52,7 +52,8 @@ async fn a_withdrawn_revision_is_never_selected_for_a_manifest()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = connect().await?;
     sqlx::query(
-        "truncate channel_digests.digest_results, channel_digests.digest_manifests,
+        "truncate channel_digests.digest_results, channel_digests.digest_manifest_sources,
+                  channel_digests.digest_manifests,
                   channel_digests.post_revisions, channel_digests.subscriptions,
                   channel_digests.channels, channel_digests.digest_runs,
                   channel_digests.inbox_messages, channel_digests.outbox_messages,

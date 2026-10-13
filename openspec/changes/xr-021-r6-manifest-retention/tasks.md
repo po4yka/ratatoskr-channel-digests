@@ -1,11 +1,11 @@
 ## 0. Plan (R6-02)
 
-- [ ] 0.1 Write this change (proposal, design, spec delta). No failing test applies because this task only edits documentation.
+- [x] 0.1 Write this change (proposal, design, spec delta). No failing test applies because this task only edits documentation.
 
 ## 1. Schema (R6-02 rule 1)
 
-- [ ] 1.1 RED: extend `tests/schema.rs` so `digest_manifests` has `minimized_at`, `canonical_text` is nullable, a row with both `canonical_text` and `minimized_at` and a row with neither are refused by the CHECK, and `digest_manifest_sources` exists with its primary key and the `(channel_id, provider_message_id)` index; run it and confirm it fails because the schema has none of them.
-- [ ] 1.2 GREEN: edit `schema.sql` in place (nullable `canonical_text`, `minimized_at`, the `digest_manifests_text_xor_minimized` CHECK, the link table and its index) and add the link table to every `truncate` list of the tests.
+- [x] 1.1 RED: extend `tests/schema.rs` so `digest_manifests` has `minimized_at`, `canonical_text` is nullable, a row with both `canonical_text` and `minimized_at` and a row with neither are refused by the CHECK, and `digest_manifest_sources` exists with its primary key and the `(channel_id, provider_message_id)` index; run it and confirm it fails because the schema has none of them.
+- [x] 1.2 GREEN: edit `schema.sql` in place (nullable `canonical_text`, `minimized_at`, the `digest_manifests_text_xor_minimized` CHECK, the link table and its index) and add the link table to every `truncate` list of the tests.
 
 ## 2. The builder carries the messages and the commit writes them (R6-02 rule 1)
 
