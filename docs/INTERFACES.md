@@ -29,7 +29,13 @@ UUID) and `X-Ratatoskr-Manifest-Digest` (64 lowercase hex). It answers `200` wit
 `Content-Type: application/json` and a body that is exactly the stored canonical manifest text,
 never re-serialized, so the SHA-256 of the body is the digest header. It answers `404` with an empty
 body for an absent manifest, another owner's manifest, a missing or malformed claim, a run id that is
-not the manifest's run, and a digest that is not the stored one; these cases are indistinguishable.
+not the manifest's run, and a digest that is not the stored one; these `404` cases are
+indistinguishable. It answers `410 Gone` with an empty body, and no `Content-Type`, when the owner,
+run and digest claims all match a manifest whose text was minimized by retention or a withdrawal
+(see [OPERATIONS.md](OPERATIONS.md)); a minimized manifest never comes back, and because the claims
+gate the row, a caller that does not prove all three still gets the `404`. A database failure is
+`503`. The statuses are service behaviour; the path and the three header names are contract
+constants.
 
 For a completed or partial result, `GET /v1/results/{result_id}` returns the local linkage and the
 Knowledge-owned recap only after the upstream analysis UUID and SHA-256 match the stored completion

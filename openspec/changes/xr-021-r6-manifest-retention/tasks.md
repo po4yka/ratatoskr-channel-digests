@@ -29,7 +29,7 @@
 
 ## 6. Documentation (R6-02 rule 6)
 
-- [ ] 6.1 Update `docs/DATA_MODEL.md`, `docs/OPERATIONS.md`, `docs/INTERFACES.md`, `docs/ARCHITECTURE.md` and `docs/THREAT_MODEL.md`. No failing test applies because this task only edits documentation.
+- [x] 6.1 Update `docs/DATA_MODEL.md`, `docs/OPERATIONS.md`, `docs/INTERFACES.md`, `docs/ARCHITECTURE.md` and `docs/THREAT_MODEL.md`. No failing test applies because this task only edits documentation.
 
 ## 7. Gate
 

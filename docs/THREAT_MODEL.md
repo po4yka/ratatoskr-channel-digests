@@ -17,7 +17,7 @@ redirect or retry, and bounds connection time, total request time, and response 
 resolution precedes dependency access, so foreign and absent result IDs cannot probe Knowledge.
 JetStream trusts only exact producer, subject, envelope, tenant, and typed payload combinations.
 Inbox/outbox identities make redelivery safe. Dynamic bodies stay behind owner-authorized manifest
-retrieval and never enter normal events, logs, metrics, or diagnostics.
+retrieval and never enter normal events, logs, metrics, or diagnostics. A manifest holds every selected post body, so its text is minimized on the same retention cutoff and by the same withdrawal as the revisions, and a read of a minimized manifest answers `410` only to a caller that proves the owner, run and digest claims.
 
 Completed and partial projections must match both the stored Knowledge analysis UUID and the exact
 SHA-256 from the accepted completion fact. Any transport, envelope, syntax, identity, or digest
