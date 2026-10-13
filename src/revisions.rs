@@ -32,6 +32,15 @@ pub struct ProvedIdRange {
     pub below: Option<i64>,
 }
 
+/// What one withdrawal changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Withdrawn {
+    /// Post revisions withdrawn, every revision of each withdrawn message counted.
+    pub revisions: u64,
+    /// Manifests that lost their text because they held a withdrawn message.
+    pub manifests: u64,
+}
+
 /// Safe immutable-revision failure.
 #[derive(Debug, thiserror::Error)]
 #[error("revision storage is unavailable")]
@@ -83,7 +92,10 @@ impl RevisionRepository {
     /// A stored, non-deleted message whose id lies inside `proved` and is not in `present` is
     /// withdrawn, and so is every stored, non-deleted message in `deleted` wherever it lies. All
     /// revisions of a withdrawn message get `deleted_at`, lose their body and get `minimized_at`
-    /// in one statement; content is not kept for a deleted post. Returns the revisions changed.
+    /// in one statement; content is not kept for a deleted post. The same statement drops the whole
+    /// text of every manifest that holds a withdrawn message, whatever the state of its run: the
+    /// text is one hashed document, so one post cannot be cut out of it. A manifest is matched by
+    /// message, so a message with no stored revision is covered too. Returns what changed.
     ///
     /// # Errors
     ///
@@ -93,24 +105,44 @@ impl RevisionRepository {
         channel_id: Uuid,
         proved: ProvedIdRange,
         (present, deleted): (&[i64], &[i64]),
-    ) -> Result<u64, RevisionError> {
-        let result = sqlx::query(
-            "update channel_digests.post_revisions
-             set deleted_at = now(), body = null, minimized_at = coalesce(minimized_at, now())
-             where channel_id = $1 and deleted_at is null
-               and ((provider_message_id >= $2
-                     and ($3::bigint is null or provider_message_id < $3)
-                     and provider_message_id <> all($4::bigint[]))
-                    or provider_message_id = any($5::bigint[]))",
+    ) -> Result<Withdrawn, RevisionError> {
+        let (revisions, manifests): (i64, i64) = sqlx::query_as(
+            "with revisions as (
+                 update channel_digests.post_revisions
+                 set deleted_at = now(), body = null, minimized_at = coalesce(minimized_at, now())
+                 where channel_id = $1 and deleted_at is null
+                   and ((provider_message_id >= $2
+                         and ($3::bigint is null or provider_message_id < $3)
+                         and provider_message_id <> all($4::bigint[]))
+                        or provider_message_id = any($5::bigint[]))
+                 returning 1
+             ), manifests as (
+                 update channel_digests.digest_manifests
+                 set canonical_text = null, minimized_at = now()
+                 where canonical_text is not null
+                   and manifest_id in (
+                       select manifest_id from channel_digests.digest_manifest_sources
+                       where channel_id = $1
+                         and ((provider_message_id >= $2
+                               and ($3::bigint is null or provider_message_id < $3)
+                               and provider_message_id <> all($4::bigint[]))
+                              or provider_message_id = any($5::bigint[]))
+                   )
+                 returning 1
+             )
+             select (select count(*) from revisions), (select count(*) from manifests)",
         )
         .bind(channel_id)
         .bind(proved.lowest)
         .bind(proved.below)
         .bind(present)
         .bind(deleted)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(|_| RevisionError)?;
-        Ok(result.rows_affected())
+        Ok(Withdrawn {
+            revisions: u64::try_from(revisions).map_err(|_| RevisionError)?,
+            manifests: u64::try_from(manifests).map_err(|_| RevisionError)?,
+        })
     }
 }

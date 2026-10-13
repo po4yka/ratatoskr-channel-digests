@@ -19,8 +19,8 @@
 
 ## 4. Withdrawal (R6-02 rule 3)
 
-- [ ] 4.1 RED: extend `tests/deleted_posts.rs`: of a manifest holding messages 7 and 8 and a manifest holding only message 9, a walk that proves message 7 gone minimizes the first and leaves the second intact; a walk that proves nothing gone minimizes nothing; a manifest whose run is `waiting_recap` is minimized too; the existing post-revision behaviour is unchanged. Make `Withdrawn` exist first, with the manifest count at zero.
-- [ ] 4.2 GREEN: `withdraw_missing` minimizes the holding manifests in the same statement, returns a `Withdrawn { revisions, manifests }`, and the acquisition path adds the manifest count to the manifests counter.
+- [x] 4.1 RED: extend `tests/deleted_posts.rs`: of a manifest holding messages 7 and 8 and a manifest holding only message 9, a walk that proves message 7 gone minimizes the first and leaves the second intact; a walk that proves nothing gone minimizes nothing; a manifest whose run is `waiting_recap` is minimized too; the existing post-revision behaviour is unchanged. Make `Withdrawn` exist first, with the manifest count at zero.
+- [x] 4.2 GREEN: `withdraw_missing` minimizes the holding manifests in the same statement, returns a `Withdrawn { revisions, manifests }`, and the acquisition path adds the manifest count to the manifests counter.
 
 ## 5. The route (R6-02 rule 4)
 

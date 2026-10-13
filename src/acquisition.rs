@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     ObservedRevision, ProvedIdRange, ProviderError, ProviderPage, ProviderPost,
-    PublicChannelProvider, PublicChannelUsername, RevisionRepository,
+    PublicChannelProvider, PublicChannelUsername, RetentionCounter, RevisionRepository,
 };
 
 /// One finite acquisition execution request.
@@ -58,6 +58,7 @@ pub struct AcquisitionEngine<P> {
     provider: P,
     revisions: RevisionRepository,
     request_timeout: Duration,
+    retention: RetentionCounter,
 }
 
 type StoredCheckpoint = (Option<String>, Option<i64>, i64, i64, bool);
@@ -70,7 +71,15 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
             provider,
             revisions,
             request_timeout,
+            retention: RetentionCounter::new(),
         }
+    }
+
+    /// Counts the manifests a withdrawal minimizes on `retention`, so the operator plane shows them.
+    #[must_use]
+    pub fn with_retention_counter(mut self, retention: RetentionCounter) -> Self {
+        self.retention = retention;
+        self
     }
 
     /// Acquires one channel under the supplied page/window bounds.
@@ -232,11 +241,20 @@ impl<P: PublicChannelProvider> AcquisitionEngine<P> {
                 live.iter().map(|post| post.message_id).collect(),
             )
         };
-        self.revisions
+        let withdrawn = self
+            .revisions
             .withdraw_missing(channel_id, proved, (&present, &deleted))
             .await
-            .map(|_withdrawn| ())
-            .map_err(|_| AcquisitionError::Unavailable)
+            .map_err(|_| AcquisitionError::Unavailable)?;
+        if withdrawn.manifests > 0 {
+            self.retention.add_manifests(withdrawn.manifests);
+            tracing::info!(
+                manifests = withdrawn.manifests,
+                class = "manifests_withdrawn",
+                "minimized manifests that held a withdrawn post"
+            );
+        }
+        Ok(())
     }
 
     async fn resolve(

@@ -10,7 +10,7 @@ use crate::coordinator::RunFailure;
 use crate::reports::{self, OperationReportRow};
 use crate::{
     AcquisitionEngine, AcquisitionError, AcquisitionRequest, CanonicalManifest, DigestCoordinator,
-    ManifestBuilder, ManifestSource, PublicChannelProvider, RevisionRepository,
+    ManifestBuilder, ManifestSource, PublicChannelProvider, RetentionCounter, RevisionRepository,
 };
 
 /// Most source revisions one manifest may hold (S08).
@@ -27,6 +27,7 @@ pub struct RunExecutor<P> {
     pool: sqlx::PgPool,
     provider: P,
     source_count: usize,
+    retention: RetentionCounter,
 }
 
 /// One accepted or interrupted run, read from the run table alone.
@@ -83,7 +84,15 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
             pool,
             provider,
             source_count: MAX_SOURCE_COUNT,
+            retention: RetentionCounter::new(),
         }
+    }
+
+    /// Counts the manifests that a withdrawal minimizes during acquisition on `retention`.
+    #[must_use]
+    pub fn with_retention_counter(mut self, retention: RetentionCounter) -> Self {
+        self.retention = retention;
+        self
     }
 
     /// Caps how many source revisions one digest takes, within the manifest bound of 1 to 100.
@@ -233,7 +242,8 @@ impl<P: PublicChannelProvider + Sync> RunExecutor<P> {
             &self.provider,
             RevisionRepository::new(self.pool.clone()),
             Duration::from_secs(15),
-        );
+        )
+        .with_retention_counter(self.retention.clone());
         let mut successful_channels = 0_usize;
         let mut deferred_channels = 0_usize;
         let mut incomplete = false;

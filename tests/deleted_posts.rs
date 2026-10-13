@@ -4,10 +4,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ratatoskr_channel_digest_contracts::sha256_hex;
 use ratatoskr_channel_digests::{
-    AcquisitionEngine, AcquisitionError, AcquisitionReport, AcquisitionRequest, Database,
-    ObservedRevision, ProviderError, ProviderPage, ProviderPost, PublicChannelProvider,
-    PublicChannelUsername, RevisionRepository, SubscriptionRepository,
+    AcquisitionEngine, AcquisitionError, AcquisitionReport, AcquisitionRequest, CommandIntake,
+    Database, DigestCoordinator, ManifestBuilder, ManifestSource, ObservedRevision, ProviderError,
+    ProviderPage, ProviderPost, PublicChannelProvider, PublicChannelUsername, RetentionCounter,
+    RevisionRepository, RunExecutor, SubscriptionRepository,
 };
 use uuid::Uuid;
 
@@ -164,11 +166,106 @@ async fn a_post_marked_deleted_by_the_provider_is_withdrawn() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_withdrawn_message_minimizes_the_manifest_that_held_it_and_only_that_one() -> TestResult {
+    let channel = Channel::with_posts(1..=9).await?;
+    channel.walk(FULL_WALK).await?;
+    let holding = channel.commit_manifest(&[7, 8]).await?;
+    let unrelated = channel.commit_manifest(&[9]).await?;
+    channel.provider.remove(7)?;
+
+    channel.walk(FULL_WALK).await?;
+
+    assert_eq!(
+        channel.manifest_state(holding).await?,
+        (true, true),
+        "the whole text of the manifest that held message 7 is gone, though its run waits for a recap"
+    );
+    assert_eq!(
+        channel.manifest_state(unrelated).await?,
+        (false, false),
+        "a manifest that did not hold the message is intact"
+    );
+    assert_eq!(
+        channel.counter.manifests(),
+        1,
+        "the minimized manifest is counted"
+    );
+    let kept: (String, i32, i32) = sqlx::query_as(
+        "select sha256, source_count, channel_count from channel_digests.digest_manifests
+         where manifest_id = $1",
+    )
+    .bind(holding)
+    .fetch_one(channel.database.pool())
+    .await?;
+    assert_eq!((kept.1, kept.2), (2, 1), "counts and digest stay: {kept:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_walk_that_proves_nothing_gone_minimizes_no_manifest() -> TestResult {
+    let channel = Channel::with_posts(1..=9).await?;
+    channel.walk(FULL_WALK).await?;
+    let manifest = channel.commit_manifest(&[7, 8]).await?;
+
+    channel.walk(FULL_WALK).await?;
+
+    assert_eq!(channel.manifest_state(manifest).await?, (false, false));
+    assert_eq!(channel.counter.manifests(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_withdrawal_also_minimizes_the_manifest_of_a_settled_run() -> TestResult {
+    let channel = Channel::with_posts(1..=9).await?;
+    channel.walk(FULL_WALK).await?;
+    let manifest = channel.commit_manifest(&[8]).await?;
+    sqlx::query(
+        "update channel_digests.digest_runs set state = 'completed'
+         where run_id = (select run_id from channel_digests.digest_manifests where manifest_id = $1)",
+    )
+    .bind(manifest)
+    .execute(channel.database.pool())
+    .await?;
+    channel.provider.mark_deleted(8)?;
+
+    channel.walk(FULL_WALK).await?;
+
+    assert_eq!(channel.manifest_state(manifest).await?, (true, true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_run_executor_counts_the_manifests_its_acquisition_minimizes() -> TestResult {
+    let channel = Channel::with_posts(5..=6).await?;
+    let executor = RunExecutor::new(channel.database.pool().clone(), &channel.provider)
+        .with_retention_counter(channel.counter.clone());
+    channel.accept_run().await?;
+    assert!(executor.execute_one().await?);
+    let first: (Uuid,) = sqlx::query_as("select manifest_id from channel_digests.digest_manifests")
+        .fetch_one(channel.database.pool())
+        .await?;
+    channel.provider.remove(5)?;
+    channel.accept_run().await?;
+
+    assert!(executor.execute_one().await?);
+
+    assert_eq!(
+        channel.manifest_state(first.0).await?,
+        (true, true),
+        "the next run's walk proved message 5 gone"
+    );
+    assert_eq!(channel.counter.manifests(), 1);
+    Ok(())
+}
+
 /// A subscribed channel with a scripted provider and the database its revisions land in.
 struct Channel {
     database: Database,
     id: Uuid,
+    owner: Uuid,
     provider: ChannelPages,
+    counter: RetentionCounter,
 }
 
 impl Channel {
@@ -189,8 +286,9 @@ impl Channel {
         )
         .execute(database.pool())
         .await?;
+        let owner = Uuid::now_v7();
         SubscriptionRepository::new(database.pool().clone())
-            .set(Uuid::now_v7(), USERNAME, true, "2026-08-27T09:00:00Z")
+            .set(owner, USERNAME, true, "2026-08-27T09:00:00Z")
             .await?;
         let (channel_id,): (Uuid,) =
             sqlx::query_as("select channel_id from channel_digests.channels where username = $1")
@@ -204,7 +302,9 @@ impl Channel {
         Ok(Self {
             database,
             id: channel_id,
+            owner,
             provider,
+            counter: RetentionCounter::new(),
         })
     }
 
@@ -214,7 +314,8 @@ impl Channel {
             &self.provider,
             RevisionRepository::new(self.database.pool().clone()),
             Duration::from_secs(5),
-        );
+        )
+        .with_retention_counter(self.counter.clone());
         engine
             .execute(&AcquisitionRequest {
                 run_id: Uuid::now_v7(),
@@ -226,6 +327,85 @@ impl Channel {
                 page_size: 3,
             })
             .await
+    }
+
+    /// Commits a manifest holding the given stored messages for a fresh run of the owner and
+    /// returns its id; the run waits for its recap, as a committed run does.
+    async fn commit_manifest(&self, ids: &[i64]) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let run_id = self.accept_run().await?;
+        let sources: Vec<ManifestSource> = ids
+            .iter()
+            .map(|id| {
+                let body = format!("post number {id}");
+                ManifestSource {
+                    revision_id: Uuid::now_v7(),
+                    channel_id: self.id,
+                    channel_username: USERNAME.to_owned(),
+                    channel_display_name: None,
+                    message_id: *id,
+                    content_sha256: sha256_hex(body.as_bytes()),
+                    published_at: in_window(*id),
+                    canonical_link: format!("https://t.me/{USERNAME}/{id}"),
+                    body,
+                    revision_index: 1,
+                }
+            })
+            .collect();
+        let manifest_id = Uuid::now_v7();
+        let manifest = ManifestBuilder::build(
+            manifest_id,
+            self.owner,
+            run_id,
+            WINDOW_START,
+            WINDOW_END,
+            &sources,
+        )?;
+        let request = serde_json::to_vec(&serde_json::json!({
+            "operation_id": Uuid::now_v7(),
+            "owner": format!("user:{}", self.owner),
+            "digest_run_id": run_id,
+            "window": {"start_at": WINDOW_START, "end_at": WINDOW_END},
+            "output_language": "ru",
+            "source_count": manifest.source_count,
+            "channel_count": manifest.channel_count,
+            "manifest_ref": format!("channel-digest-manifest:{manifest_id}"),
+            "manifest_digest": {"algorithm": "sha256", "hex": manifest.sha256},
+            "analysis_family": "channel_digest_recap",
+            "analysis_contract": "channel_digest_recap.v1"
+        }))?;
+        DigestCoordinator::new(self.database.pool().clone())
+            .commit_manifest(&manifest, &request)
+            .await?;
+        Ok(manifest_id)
+    }
+
+    /// Accepts a fresh on-demand run of the owner over the test window.
+    async fn accept_run(&self) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let run_id = Uuid::now_v7();
+        let command = serde_json::to_vec(&serde_json::json!({
+            "operation_id": Uuid::now_v7(),
+            "owner": format!("user:{}", self.owner),
+            "digest_run_id": run_id,
+            "idempotency_key": format!("withdrawn-{run_id}"),
+            "window": {"start_at": WINDOW_START, "end_at": WINDOW_END},
+            "output_language": "ru",
+            "trigger": {"kind": "on_demand", "accepted_at": WINDOW_END}
+        }))?;
+        CommandIntake::new(self.database.pool().clone())
+            .accept_run(Uuid::now_v7(), &command)
+            .await?;
+        Ok(run_id)
+    }
+
+    /// Whether the manifest text is gone and whether the minimization instant is recorded.
+    async fn manifest_state(&self, manifest_id: Uuid) -> Result<(bool, bool), sqlx::Error> {
+        sqlx::query_as(
+            "select canonical_text is null, minimized_at is not null
+             from channel_digests.digest_manifests where manifest_id = $1",
+        )
+        .bind(manifest_id)
+        .fetch_one(self.database.pool())
+        .await
     }
 
     /// Stores another body for a message already observed, so it holds two revisions.
