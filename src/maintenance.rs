@@ -44,4 +44,40 @@ impl Maintenance {
         .map_err(|_| MaintenanceError)?;
         Ok(result.rows_affected())
     }
+
+    /// Removes the text of up to `limit` manifests of settled runs whose window began before `before`.
+    ///
+    /// The oldest windows go first, so a backlog drains over several calls. The digest, counts,
+    /// owner, run and creation time stay; only the canonical text is dropped, and the row records
+    /// when. A run that is still open keeps its text, because its recap request may not have been
+    /// read yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free storage class.
+    pub async fn minimize_manifests_before(
+        &self,
+        before: &str,
+        limit: i64,
+    ) -> Result<u64, MaintenanceError> {
+        let result = sqlx::query(
+            "update channel_digests.digest_manifests set canonical_text = null, minimized_at = now()
+             where manifest_id in (
+                 select m.manifest_id from channel_digests.digest_manifests m
+                 join channel_digests.digest_runs r on r.run_id = m.run_id
+                 where m.canonical_text is not null
+                   and r.state in ('completed', 'partial', 'failed')
+                   and r.window_start < $1::timestamptz
+                 order by r.window_start, m.manifest_id
+                 limit $2
+                 for update of m skip locked
+             )",
+        )
+        .bind(before)
+        .bind(limit)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| MaintenanceError)?;
+        Ok(result.rows_affected())
+    }
 }

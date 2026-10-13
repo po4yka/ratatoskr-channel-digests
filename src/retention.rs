@@ -15,15 +15,30 @@ use crate::{Maintenance, MaintenanceError};
 /// Most rows one sweep minimizes.
 const SWEEP_BATCH: i64 = 5_000;
 
-/// Name of the counter on the operator plane.
-const METRIC: &str = "channel_digests_bodies_minimized_total";
+/// Name of the body counter on the operator plane.
+const BODIES_METRIC: &str = "channel_digests_bodies_minimized_total";
 
-/// Process-wide count of minimized bodies.
+/// Name of the manifest counter on the operator plane.
+const MANIFESTS_METRIC: &str = "channel_digests_manifests_minimized_total";
+
+/// What one retention sweep minimized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepOutcome {
+    /// Post revision bodies minimized.
+    pub bodies: u64,
+    /// Manifest texts minimized.
+    pub manifests: u64,
+}
+
+/// Process-wide counts of minimized bodies and manifest texts.
 #[derive(Debug, Clone, Default)]
-pub struct RetentionCounter(Arc<AtomicU64>);
+pub struct RetentionCounter {
+    bodies: Arc<AtomicU64>,
+    manifests: Arc<AtomicU64>,
+}
 
 impl RetentionCounter {
-    /// Creates a counter at zero.
+    /// Creates counters at zero.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -31,21 +46,33 @@ impl RetentionCounter {
 
     /// Bodies minimized since the process started.
     #[must_use]
-    pub fn get(&self) -> u64 {
-        self.0.load(Ordering::Acquire)
+    pub fn bodies(&self) -> u64 {
+        self.bodies.load(Ordering::Acquire)
+    }
+
+    /// Manifest texts minimized since the process started, by the sweep or by a withdrawal.
+    #[must_use]
+    pub fn manifests(&self) -> u64 {
+        self.manifests.load(Ordering::Acquire)
     }
 
     /// Adds minimized bodies.
-    pub fn add(&self, count: u64) {
-        self.0.fetch_add(count, Ordering::AcqRel);
+    pub fn add_bodies(&self, count: u64) {
+        self.bodies.fetch_add(count, Ordering::AcqRel);
     }
 
-    /// The counter in the Prometheus text format.
+    /// Adds minimized manifest texts.
+    pub fn add_manifests(&self, count: u64) {
+        self.manifests.fetch_add(count, Ordering::AcqRel);
+    }
+
+    /// The counters in the Prometheus text format.
     #[must_use]
     pub fn render(&self) -> String {
         format!(
-            "# HELP {METRIC} Stored post bodies minimized by the retention sweep.\n# TYPE {METRIC} counter\n{METRIC} {}\n",
-            self.get()
+            "# HELP {BODIES_METRIC} Stored post bodies minimized by the retention sweep.\n# TYPE {BODIES_METRIC} counter\n{BODIES_METRIC} {}\n# HELP {MANIFESTS_METRIC} Manifest texts minimized by the retention sweep or a withdrawal.\n# TYPE {MANIFESTS_METRIC} counter\n{MANIFESTS_METRIC} {}\n",
+            self.bodies(),
+            self.manifests()
         )
     }
 }
@@ -69,23 +96,29 @@ impl RetentionSweeper {
         }
     }
 
-    /// Minimizes one batch of bodies published before `now` minus the retention.
+    /// Minimizes one batch of bodies published before `now` minus the retention, then one batch of
+    /// manifests whose run window began before the same cutoff.
     ///
     /// # Errors
     ///
     /// Returns a content-free storage class.
-    pub async fn sweep_once(&self, now: jiff::Timestamp) -> Result<u64, MaintenanceError> {
+    pub async fn sweep_once(&self, now: jiff::Timestamp) -> Result<SweepOutcome, MaintenanceError> {
         let cutoff = now
             .checked_sub(jiff::SignedDuration::from_hours(
                 24 * i64::from(self.body_days),
             ))
             .map_err(|_| MaintenanceError)?;
-        let minimized = self
+        let bodies = self
             .maintenance
             .minimize_before(&cutoff.to_string(), SWEEP_BATCH)
             .await?;
-        self.counter.add(minimized);
-        Ok(minimized)
+        self.counter.add_bodies(bodies);
+        let manifests = self
+            .maintenance
+            .minimize_manifests_before(&cutoff.to_string(), SWEEP_BATCH)
+            .await?;
+        self.counter.add_manifests(manifests);
+        Ok(SweepOutcome { bodies, manifests })
     }
 }
 
@@ -105,8 +138,13 @@ pub async fn supervise_retention(
             biased;
             _ = drain.changed() => return,
             _ = tick.tick() => match sweeper.sweep_once(jiff::Timestamp::now()).await {
-                Ok(0) => {}
-                Ok(count) => tracing::info!(count, class = "bodies_minimized", "minimized stored post bodies"),
+                Ok(SweepOutcome { bodies: 0, manifests: 0 }) => {}
+                Ok(SweepOutcome { bodies, manifests }) => tracing::info!(
+                    bodies,
+                    manifests,
+                    class = "retention_minimized",
+                    "minimized stored post bodies and manifest texts"
+                ),
                 Err(_) => tracing::warn!(class = "retention_unavailable"),
             },
         }

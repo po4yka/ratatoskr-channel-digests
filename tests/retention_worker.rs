@@ -28,7 +28,7 @@ async fn a_sweep_nulls_only_old_bodies_and_keeps_provenance() -> TestResult {
     let counter = RetentionCounter::new();
     let sweeper = RetentionSweeper::new(database.pool().clone(), BODY_DAYS, counter.clone());
 
-    assert_eq!(sweeper.sweep_once(now).await?, 1);
+    assert_eq!(sweeper.sweep_once(now).await?.bodies, 1);
 
     let kept: (bool, String, bool, bool) = row(&database, old).await?;
     assert_eq!(
@@ -42,7 +42,7 @@ async fn a_sweep_nulls_only_old_bodies_and_keeps_provenance() -> TestResult {
         (false, "ab".repeat(32), false, true),
         "a younger body is left alone"
     );
-    assert_eq!(counter.get(), 1);
+    assert_eq!(counter.bodies(), 1);
     database.close().await;
     Ok(())
 }
@@ -67,11 +67,11 @@ async fn one_pass_minimizes_at_most_5000_rows() -> TestResult {
     let counter = RetentionCounter::new();
     let sweeper = RetentionSweeper::new(database.pool().clone(), BODY_DAYS, counter.clone());
 
-    assert_eq!(sweeper.sweep_once(now).await?, 5_000);
-    assert_eq!(sweeper.sweep_once(now).await?, 1);
-    assert_eq!(sweeper.sweep_once(now).await?, 0);
+    assert_eq!(sweeper.sweep_once(now).await?.bodies, 5_000);
+    assert_eq!(sweeper.sweep_once(now).await?.bodies, 1);
+    assert_eq!(sweeper.sweep_once(now).await?.bodies, 0);
 
-    assert_eq!(counter.get(), 5_001);
+    assert_eq!(counter.bodies(), 5_001);
     database.close().await;
     Ok(())
 }
@@ -98,11 +98,15 @@ async fn the_supervisor_sweeps_on_its_own_timer_and_logs_only_a_count() -> TestR
     ));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while counter.get() == 0 && tokio::time::Instant::now() < deadline {
+    while counter.bodies() == 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    assert_eq!(counter.get(), 1, "the timer must have swept the old body");
+    assert_eq!(
+        counter.bodies(),
+        1,
+        "the timer must have swept the old body"
+    );
     assert!(
         row(&database, old).await?.0,
         "the old body is null after the timer swept"
@@ -111,8 +115,9 @@ async fn the_supervisor_sweeps_on_its_own_timer_and_logs_only_a_count() -> TestR
     tokio::time::timeout(Duration::from_secs(5), supervisor).await??;
     let text = logs.text();
     assert!(
-        text.lines().any(|line| line.contains("count=1")),
-        "the sweep logs the number of minimized bodies: {text}"
+        text.lines()
+            .any(|line| line.contains("bodies=1") && line.contains("manifests=0")),
+        "the sweep logs the number of minimized bodies and manifests: {text}"
     );
     assert!(!text.contains(MARKER), "a log line must never carry a body");
     database.close().await;
@@ -122,7 +127,8 @@ async fn the_supervisor_sweeps_on_its_own_timer_and_logs_only_a_count() -> TestR
 #[tokio::test]
 async fn the_counter_is_served_in_the_prometheus_text_format() -> TestResult {
     let counter = RetentionCounter::new();
-    counter.add(7);
+    counter.add_bodies(7);
+    counter.add_manifests(3);
     let response = metrics_router(counter)
         .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
         .await?;
@@ -134,6 +140,11 @@ async fn the_counter_is_served_in_the_prometheus_text_format() -> TestResult {
         text.lines()
             .any(|line| line == "channel_digests_bodies_minimized_total 7"),
         "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "channel_digests_manifests_minimized_total 3"),
+        "the manifest counter is served beside the body counter: {text}"
     );
     Ok(())
 }

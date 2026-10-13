@@ -14,8 +14,8 @@
 
 ## 3. The timer (R6-02 rule 2)
 
-- [ ] 3.1 RED: extend `tests/retention_worker.rs`: a manifest of a terminal run (`completed`, `partial`, `failed`) whose window is 40 days old is minimized by `sweep_once` with `sha256`, counts, `created_at`, `owner_id`, `run_id` and the joined result unchanged; a 10 day old window and a non-terminal (`waiting_recap`) old window are untouched; 5001 manifests drain over two sweeps; `channel_digests_manifests_minimized_total` counts them and is rendered by `metrics_router` beside the bodies counter. Add `Maintenance::minimize_manifests_before` as a signature-only stub returning `Ok(0)` first.
-- [ ] 3.2 GREEN: implement `minimize_manifests_before`, run it from `RetentionSweeper::sweep_once` after `minimize_before`, return a `SweepOutcome` with both counts (every call site updated), add the second counter to `RetentionCounter` and `render`, and log both counts in `supervise_retention`.
+- [x] 3.1 RED: extend `tests/retention_worker.rs`: a manifest of a terminal run (`completed`, `partial`, `failed`) whose window is 40 days old is minimized by `sweep_once` with `sha256`, counts, `created_at`, `owner_id`, `run_id` and the joined result unchanged; a 10 day old window and a non-terminal (`waiting_recap`) old window are untouched; 5001 manifests drain over two sweeps; `channel_digests_manifests_minimized_total` counts them and is rendered by `metrics_router` beside the bodies counter. Add `Maintenance::minimize_manifests_before` as a signature-only stub returning `Ok(0)` first.
+- [x] 3.2 GREEN: implement `minimize_manifests_before`, run it from `RetentionSweeper::sweep_once` after `minimize_before`, return a `SweepOutcome` with both counts (every call site updated), add the second counter to `RetentionCounter` and `render`, and log both counts in `supervise_retention`.
 
 ## 4. Withdrawal (R6-02 rule 3)
 

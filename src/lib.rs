@@ -52,7 +52,9 @@ pub use registration::{RegistrationError, RegistrationOutcome, enqueue_schedule_
 pub use result_reader::{
     KnowledgeResultProjection, KnowledgeResultReadError, KnowledgeResultReader,
 };
-pub use retention::{RetentionCounter, RetentionSweeper, metrics_router, supervise_retention};
+pub use retention::{
+    RetentionCounter, RetentionSweeper, SweepOutcome, metrics_router, supervise_retention,
+};
 pub use revisions::{ObservedRevision, ProvedIdRange, RevisionError, RevisionRepository};
 pub use runs::{DigestRun, RunError, RunRepository, RunState, RunTrigger};
 pub use runtime::{RuntimeError, run_api, run_worker};
