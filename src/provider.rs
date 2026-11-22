@@ -236,7 +236,9 @@ impl PublicChannelProvider for MtProtoPublicChannelProvider {
                     .map_err(|_| ProviderError::Unavailable)?
                     .ok_or(ProviderError::InvalidChannel)?,
             }),
-            Peer::User(_) | Peer::Group(_) => Err(ProviderError::InvalidChannel),
+            Peer::User(_) | Peer::Group(_) | Peer::Community(_) => {
+                Err(ProviderError::InvalidChannel)
+            }
         }
     }
 
@@ -259,7 +261,7 @@ impl PublicChannelProvider for MtProtoPublicChannelProvider {
             posts.push(ProviderPost {
                 message_id: i64::from(message.id()),
                 body: message.text().to_owned(),
-                published_at: message.date().to_rfc3339(),
+                published_at: publication_timestamp(message.date()),
                 deleted: false,
             });
         }
@@ -293,4 +295,22 @@ struct PersistedSession {
     peer_infos: Vec<PeerInfo>,
     #[serde(default)]
     updates_state: UpdatesState,
+}
+
+fn publication_timestamp(timestamp: jiff::Timestamp) -> String {
+    timestamp
+        .display_with_offset(jiff::tz::Offset::UTC)
+        .to_string()
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    #[test]
+    fn publication_timestamp_retains_explicit_utc_offset() {
+        let timestamp = "2026-01-01T03:14:15Z".parse::<jiff::Timestamp>().unwrap();
+        assert_eq!(
+            super::publication_timestamp(timestamp),
+            "2026-01-01T03:14:15+00:00"
+        );
+    }
 }
